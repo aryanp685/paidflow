@@ -1,0 +1,14 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { getSupabaseConfig } from "@/lib/supabase/env";
+import { validatePublicEnvironment } from "@/lib/supabase/validate-env";
+function clean() { for (const key of ["NEXT_PUBLIC_SUPABASE_URL","NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY","NEXT_PUBLIC_SUPABASE_ANON_KEY","NEXT_PUBLIC_SITE_URL"]) vi.stubEnv(key, ""); }
+const jwt = (role:string) => `header.${btoa(JSON.stringify({role})).replace(/=/g, "")}.signature`;
+describe("public Supabase configuration", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it("permits an entirely unconfigured preview", () => { clean(); expect(() => validatePublicEnvironment()).not.toThrow(); expect(getSupabaseConfig()).toBeNull(); });
+  it("supports the legacy public anon variable", () => { clean(); vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co"); vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", jwt("anon")); vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://paidflow.example"); expect(getSupabaseConfig()?.key).toBe(jwt("anon")); expect(() => validatePublicEnvironment()).not.toThrow(); });
+  it("rejects incomplete configuration and missing callback origin", () => { clean(); vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co"); expect(() => validatePublicEnvironment()).toThrow(); vi.stubEnv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test"); expect(() => validatePublicEnvironment()).toThrow(); });
+  it("rejects service role and secret keys without logging values", () => { clean(); vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co"); vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://paidflow.example"); for (const key of [jwt("service_role"), "sb_secret_not-a-real-key"]) { vi.stubEnv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", key); expect(getSupabaseConfig()).toBeNull(); try { validatePublicEnvironment(); throw new Error("Expected failure"); } catch (error) { expect(String(error)).not.toContain(key); } } });
+  it("rejects an unsafe unused key even when the preferred key is valid", () => { clean(); vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co"); vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://paidflow.example"); vi.stubEnv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test"); vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", jwt("service_role")); expect(() => validatePublicEnvironment()).toThrow(); });
+  it("does not fall back to the anon key when an invalid publishable key was set", () => { clean(); vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://example.supabase.co"); vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://paidflow.example"); vi.stubEnv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "sb_secret_not-a-real-key"); vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", jwt("anon")); expect(getSupabaseConfig()).toBeNull(); expect(() => validatePublicEnvironment()).toThrow(); });
+});
