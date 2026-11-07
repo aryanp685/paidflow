@@ -41,13 +41,14 @@ await test('EICAR marker appended to PNG passes structural inspection: scanner g
   const sample=Buffer.concat([png,marker]);
   assert.equal(await inspect(sample,'image/png'),'image/png');
 });
-await test('anonymous upload and download reject before storage with stubbed absent session', async()=>{
-  let touched=false;
-  const poison=new Proxy({}, {get(){touched=true;throw Error('unexpected storage or database access');}});
+await test('anonymous upload and download are audited and reject before object storage', async()=>{
+  let touched=false;const events=[];
+  const store=new Proxy({}, {get(){touched=true;throw Error('unexpected object storage access');}});
+  const runtimePool={query:async(sql,args)=>{assert.match(sql,/storage_record_anonymous_denial/);events.push(args);}};
   const auth={api:{getSession:async()=>null}};
-  const storage=createStorageLab({auth,runtimePool:poison,store:poison,secret:'x'.repeat(32)});
+  const storage=createStorageLab({auth,runtimePool,store,secret:'x'.repeat(32)});
   await assert.rejects(()=>storage.upload({headers:new Headers(),businessId:randomUUID(),area:'evidence',name:'sample.png',declared:'image/png',requestId:randomUUID(),bytes:png}),/UNAUTHENTICATED/);
   await assert.rejects(()=>storage.download({headers:new Headers(),id:randomUUID(),grant:'not-a-grant'}),/UNAUTHENTICATED/);
-  assert.equal(touched,false);
+  assert.equal(touched,false);assert.deepEqual(events,[['upload','unauthenticated'],['download','unauthenticated']]);
 });
 console.log(`${passed} offline probes passed${process.exitCode ? '; failures above' : ''}. Structural inspection is not malware scanning.`);

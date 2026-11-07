@@ -7,17 +7,18 @@ import {legacyGrant} from './legacy-grant.mjs';
 const actor=randomUUID(),id=randomUUID(),other=randomUUID(),sessionId='synthetic-session';
 const secret='s'.repeat(32),now=1_800_000_000_000, headers=new Headers();
 let currentSession={user:{id:actor,emailVerified:true},session:{id:sessionId}};
-let state='structurally_valid_unscanned',denyLock=false,dbFailure=false,reads=0,locks=0;
+let state='structurally_valid_unscanned',denyLock=false,dbFailure=false,auditFailure=false,reads=0,locks=0,audits=[];
 const auth={api:{getSession:async()=>currentSession}};
 const store={get:async()=>{reads++;throw Error('UNEXPECTED_STORE_READ');}};
 const client={release(){},async query(sql,args){
   if(sql==='BEGIN'||sql==='ROLLBACK'||sql==='COMMIT')return {rows:[]};
   if(sql.includes('current_user AS role'))return {rows:[{role:'paidflow_runtime',restricted:true,not_owner:true,stale_actor:null}]};
   if(sql.includes("set_config('paidflow.actor_id'"))return {rows:[]};
+  if(sql.includes('public.storage_record_access_denial')){if(auditFailure)throw Error('AUDIT_FAILURE');audits.push(args[0]);return {rows:[]};}
   if(sql.includes('public.storage_lock')){locks++;if(dbFailure)throw Error('DB_FAILURE');if(denyLock||args[0]!==id)throw Error('FORBIDDEN');assert.equal(args[1],'read');return {rows:[{id,storage_status:state}]};}
   throw Error('Unexpected query: '+sql);
 }};
-const pool={connect:async()=>client};
+const pool={connect:async()=>client,query:async(sql,args)=>{if(!sql.includes('storage_record_anonymous_denial'))throw Error('Unexpected anonymous query');if(auditFailure)throw Error('AUDIT_FAILURE');audits.push([null,...args]);return {rows:[]};}};
 const storage=createStorageLab({auth,runtimePool:pool,store,secret,clock:()=>now});
 const make=(over={})=>legacyGrant({secret,id,sessionId,exp:now+30_000,...over});
 let count=0;
@@ -38,4 +39,5 @@ await test('authorization failure and nonexistent id are not bypassed by hold',a
   denyLock=true;await assert.rejects(()=>storage.grant({headers,id}),/FORBIDDEN/);await assert.rejects(()=>storage.download({headers,id,grant:make()}),/FORBIDDEN/);denyLock=false;await assert.rejects(()=>storage.grant({headers,id:other}),/FORBIDDEN/);await assert.rejects(()=>storage.grant({headers,id:'bad'}),/FORBIDDEN/);
 });
 await test('database errors fail closed',async()=>{dbFailure=true;await assert.rejects(()=>storage.grant({headers,id}),/DB_FAILURE/);await assert.rejects(()=>storage.download({headers,id,grant:make()}),/DB_FAILURE/);dbFailure=false;});
+await test('access denials are classified and audit failure still denies access',async()=>{audits=[];await assert.rejects(()=>storage.grant({headers,id}),/NOT_AVAILABLE/);await assert.rejects(()=>storage.download({headers,id,grant:make(),preview:true}),/NOT_AVAILABLE/);assert.deepEqual(audits,['grant','preview']);auditFailure=true;try{await assert.rejects(()=>storage.download({headers,id,grant:make()}),/AUDIT_FAILURE/);}finally{auditFailure=false;}});
 console.log(`${count} synthetic hold checks passed; no scanner or real database exercised.`);

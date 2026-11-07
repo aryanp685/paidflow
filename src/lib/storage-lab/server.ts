@@ -17,3 +17,9 @@ async function initialize() {
 }
 export function sameOrigin(request: Request) {return request.headers.get("origin") === process.env.PAIDFLOW_BA_LAB_ORIGIN;}
 export function failure(error: unknown) {const code=error instanceof Error?error.message:"";return Response.json({error:code==="UNAUTHENTICATED"?"Sign in required.":"Request could not be completed. Check permissions, file and try again."},{status:code==="UNAUTHENTICATED"?401:code.startsWith("INVALID_")?400:403,headers:{"Cache-Control":"no-store"}});}
+
+// Failure to write the audit is also a denial; never expose internal errors.
+export async function auditRejection(storage: ReturnType<typeof createStorageLab>, headers: Headers, operation: string, reason: "origin" | "validation" | "access") {
+  try { await storage.recordRequestDenial({headers,operation,reason}); } catch { /* deny even when auth or audit is unavailable */ }
+  return new Response("Forbidden",{status:403,headers:{"Cache-Control":"no-store"}});
+}

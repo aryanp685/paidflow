@@ -1,3 +1,10 @@
 "use server";
-import { cookies } from "next/headers"; import { z } from "zod"; import { createClient } from "@/lib/supabase/server";
-export async function resetPassword(password: string) { const store=await cookies(); if(store.get("paidflow_recovery")?.value !== "1" || !z.string().min(8).max(72).safeParse(password).success) return {error:true}; const supabase=await createClient(); const {data:{user},error:userError}=await supabase.auth.getUser(); if(userError || !user) return {error:true}; const {error}=await supabase.auth.updateUser({password}); if(error) return {error:true}; store.delete("paidflow_recovery"); await supabase.auth.signOut(); return {error:false}; }
+
+// The old recovery marker was not proof that the exchanged code was a recovery
+// code and was not bound to the current session. Until a provider-verified,
+// session-bound recovery flow is implemented and tested against real Auth,
+// direct calls must not update any password, even with an old marker or session.
+export async function resetPassword(..._args: unknown[]) {
+  void _args;
+  return { error: true };
+}
