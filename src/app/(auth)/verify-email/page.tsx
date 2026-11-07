@@ -1,0 +1,1 @@
+import { AuthForm } from "@/components/auth/auth-form"; export default async function Page({searchParams}:{searchParams:Promise<{error?:string}>}) { const params=await searchParams; return <AuthForm mode="verify" callbackError={params.error === "expired"}/>; }

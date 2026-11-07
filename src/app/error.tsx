@@ -1,0 +1,2 @@
+"use client"; import Link from "next/link"; import { Button } from "@/components/ui/button";
+export default function ErrorPage({reset}:{error:Error & {digest?:string};reset:()=>void}) { return <main className="not-found"><span>PAIDFLOW</span><h1>We couldn’t load<br/>this page.</h1><p>Please try again. If the problem continues, check your connection or configuration.</p><div className="flex gap-4"><Button onClick={reset}>Try again</Button><Link href="/" className="text-sm font-semibold">Back to home</Link></div></main>; }

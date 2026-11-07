@@ -1,0 +1,3 @@
+"use server";
+import { cookies } from "next/headers"; import { z } from "zod"; import { createClient } from "@/lib/supabase/server";
+export async function resetPassword(password: string) { const store=await cookies(); if(store.get("paidflow_recovery")?.value !== "1" || !z.string().min(8).max(72).safeParse(password).success) return {error:true}; const supabase=await createClient(); const {data:{user},error:userError}=await supabase.auth.getUser(); if(userError || !user) return {error:true}; const {error}=await supabase.auth.updateUser({password}); if(error) return {error:true}; store.delete("paidflow_recovery"); await supabase.auth.signOut(); return {error:false}; }

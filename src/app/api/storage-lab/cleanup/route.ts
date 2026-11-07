@@ -1,0 +1,3 @@
+import { getStorageLab, sameOrigin, failure } from "@/lib/storage-lab/server";
+export const dynamic="force-dynamic";
+export async function POST(request:Request){const storage=await getStorageLab(request.headers);if(!storage)return new Response("Not found",{status:404});if(!sameOrigin(request)||request.headers.get("content-type")!=="application/json")return new Response("Forbidden",{status:403});try{const body=await request.json();if(typeof body?.businessId!=="string")throw Error("INVALID_INPUT");const result=await storage.cleanup({headers:request.headers,businessId:body.businessId});return Response.json(result,{headers:{"Cache-Control":"no-store"}});}catch(e){return failure(e);}}

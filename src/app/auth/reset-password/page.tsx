@@ -1,0 +1,2 @@
+import { cookies } from "next/headers"; import { redirect } from "next/navigation"; import { AuthFrame } from "@/components/auth/auth-frame"; import { AuthForm } from "@/components/auth/auth-form";
+export default async function ResetPage() { if ((await cookies()).get("paidflow_recovery")?.value !== "1") redirect("/forgot-password?error=expired"); return <AuthFrame><AuthForm mode="reset"/></AuthFrame>; }
