@@ -23,5 +23,21 @@ try{
    const rows=(await q(db,'select actor_user_id,operation from paidflow_private.storage_access_denials')).rows;
    assert.deepEqual(rows,[{actor_user_id:user,operation:'grant'}]);
  });
+ await q(db,'set role paidflow_migrator');await q(db,await readFile('storage-lab/migrations/20261107050000_document_history_reader.sql','utf8'));await q(db,'reset role');
+ await test('additive history reader migration preserves prior payment and audit records',async()=>{
+   assert.deepEqual((await q(db,'select to_jsonb(p) p from public.payments p where id=$1',[paymentBefore.id])).rows[0].p,historyBefore);
+   assert.deepEqual((await q(db,'select * from public.activity_logs where business_id=$1 order by id',[business])).rows,logsBefore);
+   const events=(await withActorTransaction(pool,user,c=>q(c,'select * from public.storage_document_history($1)',[business]))).rows;
+   assert.ok(events.some(e=>e.document_id===doc&&e.event_action==='document.scan_status_reclassified'));
+ });
+ const denialsBefore=(await q(db,'select id,occurred_at,actor_user_id,operation,reason from paidflow_private.storage_access_denials order by id')).rows;
+ await q(db,'set role paidflow_migrator');await q(db,await readFile('storage-lab/migrations/20261107060000_tenant_denial_reader.sql','utf8'));await q(db,'reset role');
+ await test('tenant denial migration preserves earlier unattributed events and payment history',async()=>{
+   assert.deepEqual((await q(db,'select id,occurred_at,actor_user_id,operation,reason from paidflow_private.storage_access_denials order by id')).rows,denialsBefore);
+   assert.equal((await q(db,'select count(*)::int n from paidflow_private.storage_access_denials where business_id is not null or document_id is not null')).rows[0].n,0);
+   assert.deepEqual((await q(db,'select to_jsonb(p) p from public.payments p where id=$1',[paymentBefore.id])).rows[0].p,historyBefore);
+   assert.deepEqual((await q(db,'select * from public.activity_logs where business_id=$1 order by id',[business])).rows,logsBefore);
+   assert.equal((await withActorTransaction(pool,user,c=>q(c,'select * from public.storage_tenant_denials($1)',[business]))).rows.length,0);
+ });
 }finally{if(pool)await pool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}" with (force)`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
 console.log(`\n${passed} passed; ${failed} failed. Local synthetic Step 2C upgrade only.`);if(failed)process.exitCode=1;

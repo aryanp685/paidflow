@@ -20,8 +20,19 @@ export async function GET(request: NextRequest) {
     return protect(response);
   }
   if (code) {
+    // Modern supabase-js stores concurrent PKCE verifiers in separate slots.
+    // In a server callback the SDK cannot read the URL itself; without this ID
+    // it uses the most recent legacy verifier and may fail an earlier flow.
+    // Flow IDs are opt-in in the SDK; this alone does not enable them.
+    // This selects a verifier, NOT a provider-verified recovery purpose.
+    const flowIds=request.nextUrl.searchParams.getAll("sb_flow_id");
+    if (flowIds.length > 1 || (flowIds.length === 1 && !/^[a-zA-Z0-9_-]{8,64}$/.test(flowIds[0]))) {
+      return protect(NextResponse.redirect(new URL("/verify-email?error=expired",origin)));
+    }
     const supabase=await createClient();
-    const {error}=await supabase.auth.exchangeCodeForSession(code);
+    const {error}=flowIds.length === 1
+      ? await supabase.auth.exchangeCodeForSession(code,{flowId:flowIds[0]})
+      : await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
       const response=NextResponse.redirect(new URL("/workspace",origin));
       response.cookies.delete("paidflow_recovery");

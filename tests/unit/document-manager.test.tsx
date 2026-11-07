@@ -10,6 +10,7 @@ describe('document security hold', () => {
     const docs = ['structurally_valid_unscanned','verified'].map((status, i) => ({id: `doc-${i}`, name: `file-${i}.png`, mime:'image/png', size:123, area:'evidence', status, createdAt:'2026-01-01'}));
     const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
       if (url.includes('/workspace')) return {ok:true,json:async()=>({businesses:[{id:'business',name:'Synthetic',role:'owner'}]})};
+      if (url.includes('/history') || url.includes('/security-events')) return {ok:true,json:async()=>({events:[],hasMore:false})};
       if (options?.method === 'DELETE') return {ok:true};
       return {ok:true,json:async()=>({documents:docs})};
     });

@@ -1,5 +1,7 @@
 # Document audit and authentication verification report
 
+> **Historical snapshot:** PR #2 was subsequently merged and its production deployment promoted. The temporary application recovery block is now deployed; it does not resolve the provider-purpose gap. See `supabase-recovery-verification.md` for current work.
+
 **Scope:** local branch only, 8 November 2026. No merge, deployment, hosted database operation or cloud resource creation. No Garage or ClamAV installed. Storage grant/download/preview hold is unchanged. This is **not completion of all requested events** and is not a production-readiness or no-bugs claim.
 
 ## Audit inventory

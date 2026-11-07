@@ -14,7 +14,7 @@ const client={release(){},async query(sql,args){
   if(sql==='BEGIN'||sql==='ROLLBACK'||sql==='COMMIT')return {rows:[]};
   if(sql.includes('current_user AS role'))return {rows:[{role:'paidflow_runtime',restricted:true,not_owner:true,stale_actor:null}]};
   if(sql.includes("set_config('paidflow.actor_id'"))return {rows:[]};
-  if(sql.includes('public.storage_record_access_denial')){if(auditFailure)throw Error('AUDIT_FAILURE');audits.push(args[0]);return {rows:[]};}
+  if(sql.includes('public.storage_record_access_denial')||sql.includes('public.storage_record_context_denial')){if(auditFailure)throw Error('AUDIT_FAILURE');audits.push(args[0]);return {rows:[]};}
   if(sql.includes('public.storage_lock')){locks++;if(dbFailure)throw Error('DB_FAILURE');if(denyLock||args[0]!==id)throw Error('FORBIDDEN');assert.equal(args[1],'read');return {rows:[{id,storage_status:state}]};}
   throw Error('Unexpected query: '+sql);
 }};
