@@ -1,5 +1,7 @@
 # Steps 5–8 — progress and safety gates
 
+> **Historical snapshot:** PR #2 was subsequently merged and its production deployment promoted. The temporary application recovery block is now deployed; it does not resolve the provider-purpose gap. See `supabase-recovery-verification.md` for current work.
+
 ## Current branch, not deployed
 
 Work is in progress on the session branch; no merge, cloud configuration or deployment was performed as part of this change. No real customer files or credentials were used, and no hosted database migrations or payment contracts were changed. The storage-lab hold from steps 1–4 remains in effect: no new grants, downloads or previews are possible.
@@ -13,6 +15,10 @@ The user separately approved obtaining ClamAV and official signatures for a disp
 Authenticated and anonymous core denials now cover upload, delete, grant, download, preview, list and cleanup; selected origin and pre-delegation request-validation denials are also recorded. Restricted DB events contain no target, file content, credential or request metadata, and failure to write does not authorize a denied operation. Origin attempts are anonymous; expired, missing and fabricated sessions are deliberately indistinguishable. Existing successful registration, structural upload and delete events remain in tenant `activity_logs`. The runtime cannot read or modify private denial history; no tenant/document attribution or audit reader is provided for denials.
 
 Scan started/passed/failed and successful download events are **not implemented**: no trusted scanner exists, and successful downloads are blocked by the hold. Other operational and production gaps remain. See [the detailed audit/auth report](steps-5-8-audit-auth-report.md) for coverage, limitations, trust model and testing; do not apply the lab migration to production.
+
+### Subsequent local-lab activity view
+
+A separate owner/admin document lifecycle view is now in progress on the current branch; see [local document history](local-document-history.md). It exposes only denials whose target was authorized and rechecked, and does not expose anonymous/unattributed denials, scan outcomes or successful downloads; it is not a full audit. The Supabase provider integration and scanner/Garage gates remain blocked as described below.
 
 ## 7. Garage local pilot — stopped before launch
 

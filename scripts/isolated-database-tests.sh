@@ -15,8 +15,10 @@ mkdir -p "$root/work" "$root/usr" "$root/lib" "$root/lib64" "$root/proc" "$root/
 printf 'tester:x:1001:1001:tester:/tmp:/bin/sh\n' > "$root/etc/passwd"
 printf 'tester:x:1001:\n' > "$root/etc/group"
 git ls-files -z -- src tests neon better-auth-lab storage-lab supabase package.json package-lock.json tsconfig.json vitest.config.mts | tar --null -T - -cf - | tar -xf - -C "$root/work"
-[ ! -f storage-lab/migrations/20261107040000_storage_access_denials.sql ] || cp storage-lab/migrations/20261107040000_storage_access_denials.sql "$root/work/storage-lab/migrations/"
-for f in tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts; do [ ! -f "$f" ] || cp "$f" "$root/work/$f"; done
+for f in storage-lab/migrations/20261107040000_storage_access_denials.sql storage-lab/migrations/20261107050000_document_history_reader.sql storage-lab/migrations/20261107060000_tenant_denial_reader.sql; do
+  [ ! -f "$f" ] || cp "$f" "$root/work/storage-lab/migrations/"
+done
+for f in tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts tests/unit/supabase-pkce-sdk.test.ts tests/unit/document-history.test.tsx src/components/storage-lab/document-history.tsx src/app/api/storage-lab/history/route.ts src/components/storage-lab/document-security-events.tsx src/app/api/storage-lab/security-events/route.ts tests/unit/document-security-events.test.tsx; do [ ! -f "$f" ] || { mkdir -p "$root/work/$(dirname "$f")"; cp "$f" "$root/work/$f"; }; done
 cp -a "$pg_dir/." "$root/pg/"
 mkdir -p "$root/work/node_modules"
 ln -s usr/bin "$root/bin"

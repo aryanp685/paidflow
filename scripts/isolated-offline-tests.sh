@@ -11,8 +11,8 @@ mkdir -p "$root/work" "$root/usr" "$root/lib" "$root/lib64" "$root/proc" "$root/
 # Only reviewed project sources and tests, not .git, env files or other projects.
 git ls-files -z -- src tests neon/runtime better-auth-lab/core.mjs storage-lab package.json package-lock.json tsconfig.json vitest.config.mts | tar --null -T - -cf - | tar -xf - -C "$root/work"
 # Explicit new tests may not yet be tracked in the working tree.
-for f in tests/storage-lab/legacy-grant.mjs tests/storage-lab/download-hold-offline.mjs tests/unit/document-manager.test.tsx tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts; do
-  [ -f "$f" ] && cp "$f" "$root/work/$f"
+for f in tests/storage-lab/legacy-grant.mjs tests/storage-lab/download-hold-offline.mjs tests/unit/document-manager.test.tsx tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts tests/unit/supabase-pkce-sdk.test.ts tests/unit/document-history.test.tsx src/components/storage-lab/document-history.tsx src/app/api/storage-lab/history/route.ts src/components/storage-lab/document-security-events.tsx src/app/api/storage-lab/security-events/route.ts tests/unit/document-security-events.test.tsx; do
+  if [ -f "$f" ]; then mkdir -p "$root/work/$(dirname "$f")"; cp "$f" "$root/work/$f"; fi
 done
 # Optional known synthetic fixture for encrypted-PDF regression; never stage arbitrary data.
 if [ -n "${PAIDFLOW_ENCRYPTED_PDF_FIXTURE:-}" ]; then

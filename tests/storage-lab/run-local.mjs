@@ -32,7 +32,10 @@ try{
     await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:doc.id}));
     const rows=(await q(db,'select actor_user_id,operation,to_jsonb(x) event from paidflow_private.storage_access_denials x where id>$1 order by id',[before])).rows;
     assert.deepEqual(rows.map(x=>[x.actor_user_id,x.operation]),[[idA,'grant'],[idA,'preview'],[idA,'download'],[idB,'grant']]);
-    for(const r of rows)for(const secret of [doc.id,token,'synthetic-forgery',cookieA])assert.ok(!JSON.stringify(r.event).includes(secret));
+    for(const r of rows)for(const secret of [token,'synthetic-forgery',cookieA])assert.ok(!JSON.stringify(r.event).includes(secret));
+    assert.equal(rows[0].event.business_id,businessA);assert.equal(rows[0].event.document_id,doc.id);
+    assert.equal(rows[1].event.business_id,businessA);assert.equal(rows[1].event.document_id,doc.id);
+    for(const r of rows.slice(2)){assert.equal(r.event.business_id,null);assert.equal(r.event.document_id,null);}
     await assert.rejects(()=>q(runtimePool,'select * from paidflow_private.storage_access_denials'),e=>e.code==='42501');
     await assert.rejects(()=>q(runtimePool,"delete from paidflow_private.storage_access_denials"),e=>e.code==='42501');
     await assert.rejects(()=>withActorTransaction(runtimePool,idA,c=>q(c,"select public.storage_record_access_denial('scan')")),e=>e.code==='22023');
@@ -79,15 +82,85 @@ try{
   await test('audit outage never permits a held download',async()=>{
     const token=await oldGrant(cookieA,doc.id),get=store.get;let reads=0;
     store.get=async(...args)=>{reads++;return get(...args);};
-    await q(db,'revoke execute on function public.storage_record_access_denial(text,text) from paidflow_runtime');
-    try {await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:token}));assert.equal(reads,0);}
-    finally {store.get=get;await q(db,'grant execute on function public.storage_record_access_denial(text,text) to paidflow_runtime');}
+    await q(db,'revoke execute on function public.storage_record_context_denial(text,text,uuid,uuid) from paidflow_runtime');
+    try {await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:token}),e=>e.code==='42501');assert.equal(reads,0);}
+    finally {store.get=get;await q(db,'grant execute on function public.storage_record_context_denial(text,text,uuid,uuid) to paidflow_runtime');}
+  });
+  await test('only verified target denials appear in tenant-scoped security view',async()=>{
+    const before=(await q(db,'select coalesce(max(id),0) n from paidflow_private.storage_access_denials')).rows[0].n;
+    const token=await oldGrant(cookieA,doc.id);
+    await assert.rejects(()=>storage.grant({headers:headers(cookieA),id:doc.id}),/NOT_AVAILABLE/);
+    await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:token,preview:true}),/NOT_AVAILABLE/);
+    await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{declared:'text/html'}),/INVALID_TYPE/);
+    await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:doc.id}));
+    await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:'synthetic-forgery'}));
+    await storage.recordRequestDenial({headers:headers(cookieA),operation:'grant',reason:'origin'});
+    const rows=(await q(db,'select actor_user_id,operation,business_id,document_id from paidflow_private.storage_access_denials where id>$1 order by id',[before])).rows;
+    assert.deepEqual(rows.map(r=>[r.actor_user_id,r.operation,r.business_id,r.document_id]),[
+      [idA,'grant',businessA,doc.id],[idA,'preview',businessA,doc.id],[idA,'upload',businessA,null],
+      [idB,'grant',null,null],[idA,'download',null,null],[null,'grant',null,null],
+    ]);
+    const visible=await storage.tenantDenials({headers:headers(cookieA),businessId:businessA});
+    assert.ok(visible.events.some(e=>e.documentId===doc.id&&e.operation==='grant'));
+    assert.ok(visible.events.some(e=>e.documentId===null&&e.operation==='upload'));
+    assert.ok(!visible.events.some(e=>e.actorId===idB));
+    for(const value of [token,'synthetic-forgery',cookieA,'example.png',businessB])assert.ok(!JSON.stringify(visible).includes(value));
+    await assert.rejects(()=>storage.tenantDenials({headers:headers(cookieB),businessId:businessA}),e=>e.code==='42501');
+    await assert.rejects(()=>storage.tenantDenials({headers:new Headers(),businessId:businessA}),/UNAUTHENTICATED/);
+    await assert.rejects(()=>q(runtimePool,'select * from paidflow_private.storage_access_denials'),e=>e.code==='42501');
+  });
+  await test('tenant security view is bounded, and cross-tenant context is stripped',async()=>{
+    await withActorTransaction(runtimePool,idA,c=>q(c,"select public.storage_record_context_denial('upload','access',$1,null)",[businessB]));
+    assert.deepEqual((await q(db,'select business_id,document_id from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0],{business_id:null,document_id:null});
+    await q(db,"insert into paidflow_private.storage_access_denials(actor_user_id,operation,reason,business_id) select $1,'upload','validation',$2 from generate_series(1,101)",[idB,businessB]);
+    const view=await storage.tenantDenials({headers:headers(cookieB),businessId:businessB});assert.equal(view.events.length,100);assert.equal(view.hasMore,true);
+    assert.ok(view.events.every(e=>e.actorId===idB&&e.documentId===null));
+  });
+  await test('permission changes during audit insertion strip target identifiers',async()=>{
+    await q(db,"update public.business_members set status='suspended' where business_id=$1 and user_id=$2",[businessA,idA]);
+    try{await withActorTransaction(runtimePool,idA,c=>q(c,"select public.storage_record_context_denial('grant','access',null,$1)",[doc.id]));
+      const row=(await q(db,'select business_id,document_id from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0];assert.deepEqual(row,{business_id:null,document_id:null});
+    }finally{await q(db,"update public.business_members set status='active' where business_id=$1 and user_id=$2",[businessA,idA]);}
+  });
+  await test('audit outage on an authorized upload denial fails closed',async()=>{
+    const original=store.put;let writes=0;store.put=async(...args)=>{writes++;return original(...args);};
+    await q(db,'revoke execute on function public.storage_record_context_denial(text,text,uuid,uuid) from paidflow_runtime');
+    try{await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{declared:'text/html'}),e=>e.code==='42501');assert.equal(writes,0);}
+    finally{store.put=original;await q(db,'grant execute on function public.storage_record_context_denial(text,text,uuid,uuid) to paidflow_runtime');}
   });
   await test('unapproved MIME, spoofed signature and corrupt content denied',async()=>{await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{declared:'text/html'}),/INVALID_TYPE/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.from('<html>bad</html>')}),/INVALID_TYPE/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.concat([png.subarray(0,8),Buffer.from('broken')])}),/INVALID_CONTENT/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.from('%PDF-1.7\nfake\n%%EOF'),declared:'application/pdf'}),/INVALID_CONTENT/);});
   await test('empty and oversized payloads denied',async()=>{await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.alloc(0)}),/INVALID_SIZE/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.alloc(MAX_BYTES+1)}),/INVALID_SIZE/);});
   await test('filename sanitized and object key generated by server',async()=>{const d=await runUpload(cookieA,businessA,'evidence',{name:'../../invoice\u202e<script>.png'});assert.ok(!/[\\/<>\u202e]/.test(d.name));const row=(await q(db,'select storage_path from public.documents where id=$1',[d.id])).rows[0];assert.match(row.storage_path,new RegExp(`^${businessA}/[0-9a-f-]{36}$`));});
+  await test('owner history is tenant-bound, projected, and excludes arbitrary event metadata',async()=>{
+    const bd=await runUpload(cookieB,businessB),secret='synthetic-secret-cookie-token-url-filename';
+    await q(db,"insert into public.activity_logs(business_id,actor_user_id,entity_type,entity_id,action,metadata) values($1,$2,'document',$3,'document.registered',jsonb_build_object('untrusted',$4::text))",[businessA,idA,doc.id,secret]);
+    const a=await storage.history({headers:headers(cookieA),businessId:businessA});const b=await storage.history({headers:headers(cookieB),businessId:businessB});
+    assert.ok(a.events.some(e=>e.documentId===doc.id));assert.ok(b.events.some(e=>e.documentId===bd.id));
+    assert.ok(!a.events.some(e=>e.documentId===bd.id));assert.ok(!b.events.some(e=>e.documentId===doc.id));
+    assert.ok(!JSON.stringify(a).includes(secret));assert.ok(!JSON.stringify(a).includes('example.png'));assert.ok(a.events.every(e=>Object.keys(e).sort().join(',')==='action,actorId,documentId,id,occurredAt'));
+    await assert.rejects(()=>storage.history({headers:headers(cookieB),businessId:businessA}),e=>e.code==='42501');
+    await assert.rejects(()=>storage.history({headers:new Headers(),businessId:businessA}),/UNAUTHENTICATED/);
+    await assert.rejects(()=>storage.history({headers:headers(cookieA),businessId:'invalid'}),/FORBIDDEN/);
+  });
+  await test('history limits disclosure and indicates truncation',async()=>{
+    await q(db,"insert into public.activity_logs(business_id,actor_user_id,entity_type,entity_id,action) select $1,$2,'document',$3,'document.registered' from generate_series(1,101)",[businessB,idB,randomUUID()]);
+    const h=await storage.history({headers:headers(cookieB),businessId:businessB});assert.equal(h.events.length,100);assert.equal(h.hasMore,true);
+  });
+  await test('history reader transaction serializes with suspension and then denies suspended access',async()=>{
+    let ready,release;const started=new Promise(r=>{ready=r}),gate=new Promise(r=>{release=r});let changed=false,change;
+    const worker=withActorTransaction(runtimePool,idA,async c=>{await q(c,'select * from public.storage_document_history($1)',[businessA]);await q(c,'select * from public.storage_tenant_denials($1)',[businessA]);ready();await gate;});
+    try{await started;change=q(db,"update public.business_members set status='suspended' where business_id=$1 and user_id=$2",[businessA,idA]).then(()=>{changed=true;});await new Promise(r=>setTimeout(r,100));assert.equal(changed,false);release();await worker;await change;await assert.rejects(()=>storage.history({headers:headers(cookieA),businessId:businessA}),e=>e.code==='42501');}
+    finally{release();await worker.catch(()=>{});if(change)await change.catch(()=>{});await q(db,"update public.business_members set status='active' where business_id=$1 and user_id=$2",[businessA,idA]);}
+  });
   await test('cross-tenant upload, grant and deletion denied',async()=>{await assert.rejects(()=>runUpload(cookieB,businessA),/FORBIDDEN/);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:doc.id}));await assert.rejects(()=>storage.remove({headers:headers(cookieB),id:doc.id}));});
   await test('viewer can only read evidence, cannot access proofs/OCR or upload/delete',async()=>{await q(db,"insert into public.business_members(business_id,user_id,role) values($1,$2,'viewer')",[businessA,idB]);const visible=await storage.list({headers:headers(cookieB),businessId:businessA});assert.ok(visible.some(d=>d.id===doc.id));assert.ok(!visible.some(d=>d.id===proof.id||d.id===ocr.id));await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:doc.id}),/NOT_AVAILABLE/);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:proof.id}));await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:ocr.id}));await assert.rejects(()=>runUpload(cookieB,businessA));await assert.rejects(()=>storage.remove({headers:headers(cookieB),id:doc.id}));});
+  await test('history is restricted to active owner or admin, not viewer',async()=>{
+    await assert.rejects(()=>storage.history({headers:headers(cookieB),businessId:businessA}),e=>e.code==='42501');
+    await assert.rejects(()=>storage.tenantDenials({headers:headers(cookieB),businessId:businessA}),e=>e.code==='42501');
+    await q(db,"update public.business_members set role='admin' where business_id=$1 and user_id=$2",[businessA,idB]);
+    try{assert.ok((await storage.history({headers:headers(cookieB),businessId:businessA})).events.some(e=>e.documentId===doc.id));assert.ok((await storage.tenantDenials({headers:headers(cookieB),businessId:businessA})).events.length>0);}
+    finally{await q(db,"update public.business_members set role='viewer' where business_id=$1 and user_id=$2",[businessA,idB]);}
+  });
   await test('viewer cannot use another session grant or clean storage',async()=>{const g=await oldGrant(cookieA,doc.id);await assert.rejects(()=>storage.download({headers:headers(cookieB),id:doc.id,grant:g}),/INVALID_GRANT/);await assert.rejects(()=>storage.cleanup({headers:headers(cookieB),businessId:businessA}));});
   await test('accountant and manager have area-specific permissions',async()=>{await q(db,"update public.business_members set role='accountant' where business_id=$1 and user_id=$2",[businessA,idB]);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:proof.id}),/NOT_AVAILABLE/);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:ocr.id}));await q(db,"update public.business_members set role='manager' where business_id=$1 and user_id=$2",[businessA,idB]);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:ocr.id}),/NOT_AVAILABLE/);await assert.rejects(()=>storage.remove({headers:headers(cookieB),id:doc.id}));await q(db,"update public.business_members set role='viewer' where business_id=$1 and user_id=$2",[businessA,idB]);});
   await test('suspension revokes previously issued grant immediately',async()=>{const g=await oldGrant(cookieB,doc.id);await q(db,"update public.business_members set status='suspended' where business_id=$1 and user_id=$2",[businessA,idB]);await assert.rejects(()=>storage.download({headers:headers(cookieB),id:doc.id,grant:g}));await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:doc.id}));await q(db,"update public.business_members set status='active' where business_id=$1 and user_id=$2",[businessA,idB]);});
@@ -107,9 +180,9 @@ try{
     await q(db,"update public.documents set customer_id=$1,invoice_id=$2,storage_status='verified' where id=$3",[customer,invoice,linked.id]);
     const first=(await withActorTransaction(runtimePool,idA,c=>q(c,"select public.record_payment($1,$2,$3,200,'2026-05-01','upi',null,$4,null) as result",[businessA,invoice,key,linked.id]))).rows[0].result;assert.equal(first.invoice.paid_paise,200);assert.equal(first.invoice.balance_paise,800);
     const retry=(await withActorTransaction(runtimePool,idA,c=>q(c,"select public.record_payment($1,$2,$3,200,'2026-05-01','upi',null,$4,null) as result",[businessA,invoice,key,linked.id]))).rows[0].result;assert.equal(retry.replayed,true);
-    await assert.rejects(()=>storage.remove({headers:headers(cookieA),id:linked.id}));const row=(await q(db,'select paid_paise,balance_paise from public.invoices where id=$1',[invoice])).rows[0];assert.deepEqual(row,{paid_paise:'200',balance_paise:'800'});assert.equal((await q(db,'select storage_status from public.documents where id=$1',[linked.id])).rows[0].storage_status,'verified');
+    await assert.rejects(()=>storage.remove({headers:headers(cookieA),id:linked.id}));const deny=(await q(db,'select business_id,document_id,operation from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0];assert.deepEqual(deny,{business_id:businessA,document_id:linked.id,operation:'delete'});const row=(await q(db,'select paid_paise,balance_paise from public.invoices where id=$1',[invoice])).rows[0];assert.deepEqual(row,{paid_paise:'200',balance_paise:'800'});assert.equal((await q(db,'select storage_status from public.documents where id=$1',[linked.id])).rows[0].storage_status,'verified');
   });
   await test('runtime cannot mutate document metadata directly',async()=>{await assert.rejects(()=>q(runtimePool,"update public.documents set storage_status='verified'"),e=>e.code==='42501');await assert.rejects(()=>q(runtimePool,"insert into public.documents(business_id,category,file_name,storage_path,mime_type,file_size_bytes) values($1,'other','x','x','image/png',1)",[businessA]),e=>e.code==='42501');});
-  await test('expired Better Auth session cannot download, even with grant',async()=>{const g=await oldGrant(cookieA,doc.id);await q(db,'update public."session" set "expiresAt"=now()-interval \'1 second\' where "userId"=$1',[idA]);await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g}),/UNAUTHENTICATED/);const r=(await q(db,'select actor_user_id,operation,reason from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0];assert.deepEqual(r,{actor_user_id:null,operation:'download',reason:'unauthenticated'});});
+  await test('expired Better Auth session cannot download, even with grant',async()=>{const g=await oldGrant(cookieA,doc.id);await q(db,'update public."session" set "expiresAt"=now()-interval \'1 second\' where "userId"=$1',[idA]);await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g}),/UNAUTHENTICATED/);await assert.rejects(()=>storage.history({headers:headers(cookieA),businessId:businessA}),/UNAUTHENTICATED/);await assert.rejects(()=>storage.tenantDenials({headers:headers(cookieA),businessId:businessA}),/UNAUTHENTICATED/);const r=(await q(db,'select actor_user_id,operation,reason from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0];assert.deepEqual(r,{actor_user_id:null,operation:'download',reason:'unauthenticated'});});
 }finally{if(store)store.close();if(emulator)await emulator.close();if(dir)await rm(dir,{recursive:true,force:true});if(runtimePool)await runtimePool.end();if(authPool)await authPool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}" with (force)`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
 console.log(`\n${passed} passed; ${failed} failed. Local Better Auth + PostgreSQL + S3 emulator.`);if(failed)process.exitCode=1;
