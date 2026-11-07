@@ -23,6 +23,66 @@ try{
   await test('JPEG content is decoded and remains unscanned',async()=>{const jpeg=await sharp({create:{width:4,height:4,channels:3,background:'#aabbcc'}}).jpeg().toBuffer();const d=await runUpload(cookieA,businessA,'evidence',{name:'photo.jpg',declared:'image/jpeg',bytes:jpeg});assert.equal(d.status,'structurally_valid_unscanned');});
   await test('17 application tables and extraction schema remain present',async()=>{const r=await q(db,"select count(*)::int n from information_schema.tables where table_schema='public' and table_name not in ('user','session','account','verification') and table_type='BASE TABLE'");assert.equal(r.rows[0].n,17);assert.equal((await q(db,"select count(*)::int n from information_schema.tables where table_schema='public' and table_name='document_extractions'")).rows[0].n,1);});
   await test('unscanned download and preview are denied even with an old valid grant',async()=>{const g=await oldGrant(cookieA,doc.id);await assert.rejects(()=>storage.grant({headers:headers(cookieA),id:doc.id}),/NOT_AVAILABLE/);for(const preview of [false,true])await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g,preview}),/NOT_AVAILABLE/);await assert.rejects(()=>storage.download({headers:headers(cookieA),id:proof.id,grant:g}),/INVALID_GRANT/);});
+  await test('authenticated access denials persist separately without target or token leakage',async()=>{
+    const before=(await q(db,'select coalesce(max(id),0) n from paidflow_private.storage_access_denials')).rows[0].n;
+    const token=await oldGrant(cookieA,doc.id);
+    await assert.rejects(()=>storage.grant({headers:headers(cookieA),id:doc.id}),/NOT_AVAILABLE/);
+    await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:token,preview:true}),/NOT_AVAILABLE/);
+    await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:'synthetic-forgery'}),/INVALID_GRANT/);
+    await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:doc.id}));
+    const rows=(await q(db,'select actor_user_id,operation,to_jsonb(x) event from paidflow_private.storage_access_denials x where id>$1 order by id',[before])).rows;
+    assert.deepEqual(rows.map(x=>[x.actor_user_id,x.operation]),[[idA,'grant'],[idA,'preview'],[idA,'download'],[idB,'grant']]);
+    for(const r of rows)for(const secret of [doc.id,token,'synthetic-forgery',cookieA])assert.ok(!JSON.stringify(r.event).includes(secret));
+    await assert.rejects(()=>q(runtimePool,'select * from paidflow_private.storage_access_denials'),e=>e.code==='42501');
+    await assert.rejects(()=>q(runtimePool,"delete from paidflow_private.storage_access_denials"),e=>e.code==='42501');
+    await assert.rejects(()=>withActorTransaction(runtimePool,idA,c=>q(c,"select public.storage_record_access_denial('scan')")),e=>e.code==='22023');
+  });
+  await test('denied upload and delete plus anonymous requests are persisted without tenant identifiers',async()=>{
+    const before=(await q(db,'select coalesce(max(id),0) n from paidflow_private.storage_access_denials')).rows[0].n;
+    await assert.rejects(()=>runUpload(cookieB,businessA));
+    await assert.rejects(()=>storage.remove({headers:headers(cookieB),id:doc.id}));
+    await assert.rejects(()=>storage.grant({headers:new Headers(),id:doc.id}),/UNAUTHENTICATED/);
+    await storage.recordRequestDenial({headers:headers(cookieA),operation:'upload',reason:'origin'});
+    await storage.recordRequestDenial({headers:headers(cookieA),operation:'upload',reason:'validation'});
+    const rows=(await q(db,'select actor_user_id,operation,reason,to_jsonb(x) event from paidflow_private.storage_access_denials x where id>$1 order by id',[before])).rows;
+    assert.deepEqual(rows.map(({actor_user_id,operation,reason})=>[actor_user_id,operation,reason]),[[idB,'upload','access'],[idB,'delete','access'],[null,'grant','unauthenticated'],[null,'upload','origin'],[idA,'upload','validation']]);
+    for(const row of rows)for(const secret of [businessA,businessB,doc.id,cookieA,cookieB,'example.png'])assert.ok(!JSON.stringify(row.event).includes(secret));
+    await assert.rejects(()=>q(runtimePool,'update paidflow_private.storage_access_denials set operation=$1',['upload']),e=>e.code==='42501');
+    await assert.rejects(()=>q(runtimePool,'truncate paidflow_private.storage_access_denials'),e=>e.code==='42501');
+    await assert.rejects(()=>q(runtimePool,"select public.storage_record_anonymous_denial('scan','origin')"),e=>e.code==='22023');
+  });
+  await test('concurrent denials persist independently and neither tenant can read events',async()=>{
+    const before=(await q(db,'select coalesce(max(id),0) n from paidflow_private.storage_access_denials')).rows[0].n;
+    const attempts=await Promise.allSettled(Array.from({length:8},()=>storage.grant({headers:headers(cookieA),id:doc.id})));
+    assert.ok(attempts.every(x=>x.status==='rejected'));
+    assert.equal((await q(db,"select count(*)::int n from paidflow_private.storage_access_denials where id>$1 and actor_user_id=$2 and operation='grant'",[before,idA])).rows[0].n,8);
+    for(const actor of [idA,idB])await assert.rejects(()=>withActorTransaction(runtimePool,actor,c=>q(c,'select * from paidflow_private.storage_access_denials')),e=>e.code==='42501');
+    await withActorTransaction(runtimePool,idA,c=>q(c,"select public.storage_record_anonymous_denial('grant','origin')"));
+    const last=(await q(db,'select actor_user_id,reason from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0];
+    assert.deepEqual(last,{actor_user_id:null,reason:'origin'});
+  });
+  await test('audit outage never authorizes denied upload or delete',async()=>{
+    await q(db,'revoke execute on function public.storage_record_access_denial(text,text) from paidflow_runtime');
+    let puts=0,deletes=0;const put=store.put,del=store.delete;
+    store.put=async(...args)=>{puts++;return put(...args);};store.delete=async(...args)=>{deletes++;return del(...args);};
+    try{await assert.rejects(()=>runUpload(cookieB,businessA));await assert.rejects(()=>storage.remove({headers:headers(cookieB),id:doc.id}));assert.equal(puts,0);assert.equal(deletes,0);}
+    finally{store.put=put;store.delete=del;await q(db,'grant execute on function public.storage_record_access_denial(text,text) to paidflow_runtime');}
+  });
+  await test('auth outage is anonymous and anonymous-audit outage stays denied',async()=>{
+    const unavailable=createStorageLab({auth:{api:{getSession:async()=>{throw Error('synthetic auth outage');}}},runtimePool,store,secret:grantSecret});
+    await assert.rejects(()=>unavailable.grant({headers:headers(cookieA),id:doc.id}),/synthetic auth outage/);
+    assert.deepEqual((await q(db,'select actor_user_id,operation,reason from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0],{actor_user_id:null,operation:'grant',reason:'auth_unavailable'});
+    await q(db,'revoke execute on function public.storage_record_anonymous_denial(text,text) from paidflow_runtime');
+    try{await assert.rejects(()=>storage.download({headers:new Headers(),id:doc.id,grant:'fake'}));}
+    finally{await q(db,'grant execute on function public.storage_record_anonymous_denial(text,text) to paidflow_runtime');}
+  });
+  await test('audit outage never permits a held download',async()=>{
+    const token=await oldGrant(cookieA,doc.id),get=store.get;let reads=0;
+    store.get=async(...args)=>{reads++;return get(...args);};
+    await q(db,'revoke execute on function public.storage_record_access_denial(text,text) from paidflow_runtime');
+    try {await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:token}));assert.equal(reads,0);}
+    finally {store.get=get;await q(db,'grant execute on function public.storage_record_access_denial(text,text) to paidflow_runtime');}
+  });
   await test('unapproved MIME, spoofed signature and corrupt content denied',async()=>{await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{declared:'text/html'}),/INVALID_TYPE/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.from('<html>bad</html>')}),/INVALID_TYPE/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.concat([png.subarray(0,8),Buffer.from('broken')])}),/INVALID_CONTENT/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.from('%PDF-1.7\nfake\n%%EOF'),declared:'application/pdf'}),/INVALID_CONTENT/);});
   await test('empty and oversized payloads denied',async()=>{await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.alloc(0)}),/INVALID_SIZE/);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{bytes:Buffer.alloc(MAX_BYTES+1)}),/INVALID_SIZE/);});
   await test('filename sanitized and object key generated by server',async()=>{const d=await runUpload(cookieA,businessA,'evidence',{name:'../../invoice\u202e<script>.png'});assert.ok(!/[\\/<>\u202e]/.test(d.name));const row=(await q(db,'select storage_path from public.documents where id=$1',[d.id])).rows[0];assert.match(row.storage_path,new RegExp(`^${businessA}/[0-9a-f-]{36}$`));});
@@ -50,6 +110,6 @@ try{
     await assert.rejects(()=>storage.remove({headers:headers(cookieA),id:linked.id}));const row=(await q(db,'select paid_paise,balance_paise from public.invoices where id=$1',[invoice])).rows[0];assert.deepEqual(row,{paid_paise:'200',balance_paise:'800'});assert.equal((await q(db,'select storage_status from public.documents where id=$1',[linked.id])).rows[0].storage_status,'verified');
   });
   await test('runtime cannot mutate document metadata directly',async()=>{await assert.rejects(()=>q(runtimePool,"update public.documents set storage_status='verified'"),e=>e.code==='42501');await assert.rejects(()=>q(runtimePool,"insert into public.documents(business_id,category,file_name,storage_path,mime_type,file_size_bytes) values($1,'other','x','x','image/png',1)",[businessA]),e=>e.code==='42501');});
-  await test('expired Better Auth session cannot download, even with grant',async()=>{const g=await oldGrant(cookieA,doc.id);await q(db,'update public."session" set "expiresAt"=now()-interval \'1 second\' where "userId"=$1',[idA]);await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g}),/UNAUTHENTICATED/);});
+  await test('expired Better Auth session cannot download, even with grant',async()=>{const g=await oldGrant(cookieA,doc.id);await q(db,'update public."session" set "expiresAt"=now()-interval \'1 second\' where "userId"=$1',[idA]);await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g}),/UNAUTHENTICATED/);const r=(await q(db,'select actor_user_id,operation,reason from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0];assert.deepEqual(r,{actor_user_id:null,operation:'download',reason:'unauthenticated'});});
 }finally{if(store)store.close();if(emulator)await emulator.close();if(dir)await rm(dir,{recursive:true,force:true});if(runtimePool)await runtimePool.end();if(authPool)await authPool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}" with (force)`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
 console.log(`\n${passed} passed; ${failed} failed. Local Better Auth + PostgreSQL + S3 emulator.`);if(failed)process.exitCode=1;

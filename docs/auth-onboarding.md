@@ -1,5 +1,7 @@
 # Authentication and onboarding — Step 1C
 
+> **Current branch security hold:** Supabase password recovery is temporarily disabled, including direct reset actions and recovery callbacks. The former recovery marker was not reliable proof of a recovery flow. This is a fail-closed mitigation, not a functional recovery fix; do not enable recovery until it is validated against real isolated Supabase Auth. See [steps 5–8 progress](steps-5-8-progress.md). The remainder is historical where it describes the earlier recovery behavior.
+
 ## Status and safety
 
 The app uses real `@supabase/ssr` browser and cookie-based server clients, Next.js 16 `proxy.ts` for session refresh, server-side `auth.getUser()` verification, and RLS-scoped database calls. There is no service-role client or mock login. No Supabase project is connected. **Do not deploy or use real business data yet:** actual local Supabase Auth, PostgREST, email, proxy/session refresh, and the migrations together remain unverified in this environment.

@@ -10,10 +10,17 @@ trap 'rm -rf "$root"' EXIT HUP INT TERM
 mkdir -p "$root/work" "$root/usr" "$root/lib" "$root/lib64" "$root/proc" "$root/tmp" "$root/dev" "$root/home" "$root/run"
 # Only reviewed project sources and tests, not .git, env files or other projects.
 git ls-files -z -- src tests neon/runtime better-auth-lab/core.mjs storage-lab package.json package-lock.json tsconfig.json vitest.config.mts | tar --null -T - -cf - | tar -xf - -C "$root/work"
-# These two new test files may not yet be tracked in the working tree.
-for f in tests/storage-lab/legacy-grant.mjs tests/storage-lab/download-hold-offline.mjs tests/unit/document-manager.test.tsx; do
+# Explicit new tests may not yet be tracked in the working tree.
+for f in tests/storage-lab/legacy-grant.mjs tests/storage-lab/download-hold-offline.mjs tests/unit/document-manager.test.tsx tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts; do
   [ -f "$f" ] && cp "$f" "$root/work/$f"
 done
+# Optional known synthetic fixture for encrypted-PDF regression; never stage arbitrary data.
+if [ -n "${PAIDFLOW_ENCRYPTED_PDF_FIXTURE:-}" ]; then
+  fixture=$(realpath "$PAIDFLOW_ENCRYPTED_PDF_FIXTURE")
+  case "$fixture" in /tmp/*) ;; *) echo 'Fixture must be staged under /tmp' >&2; exit 1;; esac
+  [ "$(sha256sum "$fixture" | cut -d " " -f1)" = f140ecceeef96c941aada327df6b4ac6f9a4694aab2bcc37c5d6dd80c73bdb26 ] || { echo 'Unexpected encrypted fixture hash' >&2; exit 1; }
+  cp "$fixture" "$root/work/encrypted-test.pdf"
+fi
 mkdir -p "$root/work/node_modules"
 touch "$root/dev/null" "$root/dev/urandom" "$root/dev/random"
 # No inherited environment or open network/IPC namespace. Bind only runtime and
@@ -46,6 +53,11 @@ env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent \
         cd /work
         node -e "const fs=require(\"fs\"),net=require(\"net\"),os=require(\"os\"); if(!/CapEff:\s+0+\b/.test(fs.readFileSync(\"/proc/self/status\",\"utf8\")))process.exit(4); if(fs.existsSync(\"/home/user\")||fs.existsSync(\"/run/user\")||fs.existsSync(\"/work/.git\")||process.env.AWS_SECRET_ACCESS_KEY)process.exit(1); const s=net.connect(80,\"1.1.1.1\");s.on(\"connect\",()=>process.exit(2));s.on(\"error\",e=>{if(e.code!==\"ENETUNREACH\")process.exit(3);console.log(\"Isolation probe: no external network route; host home, run sockets, git and inherited credentials absent\");});"
         node tests/storage-lab/download-hold-offline.mjs
+        if [ -f /work/encrypted-test.pdf ]; then
+          PAIDFLOW_ENCRYPTED_PDF_FIXTURE=/work/encrypted-test.pdf node tests/storage-lab/security-evaluation-offline.mjs
+        else
+          echo "SKIP security-evaluation-offline: optional synthetic encrypted PDF fixture absent"
+        fi
         node node_modules/vitest/vitest.mjs run --configLoader runner
       '\''
   ' sh "$root" "$repo"

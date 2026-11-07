@@ -28,7 +28,7 @@ export function createStorageLab({auth,runtimePool,store,secret,clock=()=>Date.n
   async function lock(db,id,action){if(!uuid.test(id||''))throw Error('FORBIDDEN');return (await db.query('select * from public.storage_lock($1,$2)',[id,action])).rows[0];}
   async function transition(db,id,state){return (await db.query('select * from public.storage_transition($1,$2)',[id,state])).rows[0];}
   function publicDoc(d){return {id:d.id,businessId:d.business_id,name:d.file_name,mime:d.mime_type,size:Number(d.file_size_bytes),area:d.storage_area,status:d.storage_status,createdAt:d.created_at};}
-  async function upload({headers,businessId,area,name,declared,requestId,bytes}){
+  async function doUpload({headers,businessId,area,name,declared,requestId,bytes}){
     if(!areas.includes(area)||!uuid.test(requestId||''))throw Error('INVALID_INPUT');
     // No unauthenticated or non-member upload reaches expensive parsers or storage.
     await withVerifiedBusiness({auth,runtimePool,headers,businessId,allowedRoles:uploadRoles,work:async()=>null});
@@ -46,15 +46,49 @@ export function createStorageLab({auth,runtimePool,store,secret,clock=()=>Date.n
       return publicDoc(await transition(db,d.id,'structurally_valid_unscanned'));
     });
   }
-  async function list({headers,businessId}){return withVerifiedBusiness({auth,runtimePool,headers,businessId,allowedRoles:['owner','admin','manager','accountant','viewer'],work:async db=>(await db.query("select id,business_id,file_name,mime_type,file_size_bytes,storage_area,storage_status,created_at from public.documents where business_id=$1 and storage_status in ('quarantine','structurally_valid_unscanned','verified','deleting') order by created_at desc limit 200",[businessId])).rows.map(publicDoc)});}
+  async function doList({headers,businessId}){return withVerifiedBusiness({auth,runtimePool,headers,businessId,allowedRoles:['owner','admin','manager','accountant','viewer'],work:async db=>(await db.query("select id,business_id,file_name,mime_type,file_size_bytes,storage_area,storage_status,created_at from public.documents where business_id=$1 and storage_status in ('quarantine','structurally_valid_unscanned','verified','deleting') order by created_at desc limit 200",[businessId])).rows.map(publicDoc)});}
   function validate(token,id,sessionId){if(typeof token!=='string'||token.length>2048)throw Error('INVALID_GRANT');const pieces=token.split('.');if(pieces.length!==2)throw Error('INVALID_GRANT');const expected=createHmac('sha256',secret).update('paidflow-storage-grant-v1.'+pieces[0]+'.'+sessionId).digest();let actual,payload;try{actual=Buffer.from(pieces[1],'base64url');payload=JSON.parse(Buffer.from(pieces[0],'base64url').toString());}catch{throw Error('INVALID_GRANT');}if(actual.length!==expected.length||!timingSafeEqual(actual,expected)||payload.id!==id||!Number.isSafeInteger(payload.exp)||payload.exp<=clock()||payload.exp>clock()+60_000)throw Error('INVALID_GRANT');}
   // Interim security hold: no current status (including legacy "verified") carries a
   // trusted malware-scan attestation. Keep authentication and the database's read
   // authorization check, but never issue a grant or fetch bytes under this policy.
-  async function grant({headers,id}){const s=await session(headers);return withActorTransaction(runtimePool,s.user.id,async db=>{await lock(db,id,'read');throw Error('NOT_AVAILABLE');});}
-  async function download({headers,id,grant:token}){const s=await session(headers);validate(token,id,s.session.id);return withActorTransaction(runtimePool,s.user.id,async db=>{await lock(db,id,'read');throw Error('NOT_AVAILABLE');});}
-  async function remove({headers,id}){const s=await session(headers);await withActorTransaction(runtimePool,s.user.id,async db=>{const d=await lock(db,id,'delete');if(d.storage_status==='deleted'||d.storage_status==='deleting')return;if(!['structurally_valid_unscanned','verified','revoked'].includes(d.storage_status))throw Error('INVALID_STATE');await transition(db,id,'deleting');});return withActorTransaction(runtimePool,s.user.id,async db=>{const d=await lock(db,id,'delete');if(d.storage_status==='deleted')return;if(d.storage_status!=='deleting')throw Error('INVALID_STATE');await store.delete(d.storage_area,d.storage_path);await transition(db,id,'deleted');});}
-  async function cleanup({headers,businessId}){return withVerifiedBusiness({auth,runtimePool,headers,businessId,allowedRoles:['owner','admin'],work:async db=>{await db.query('select public.storage_authorize_cleanup($1)',[businessId]);let cleaned=0;const rows=(await db.query("select id from public.documents where business_id=$1 and ((storage_status='quarantine' and storage_expires_at<=now()) or storage_status='deleting')",[businessId])).rows;for(const row of rows){const d=await lock(db,row.id,'delete');if(d.storage_status==='quarantine'&&new Date(d.storage_expires_at).getTime()<=clock()){await store.delete(d.storage_area,d.storage_path);await transition(db,d.id,'abandoned');cleaned++;}else if(d.storage_status==='deleting'){await store.delete(d.storage_area,d.storage_path);await transition(db,d.id,'deleted');cleaned++;}}
+  // Write denial in its own transaction after the access transaction rolls back.
+  // The audit function stores no requested document or other untrusted input.
+  // If the audit write fails, access still fails closed.
+  async function anonymousDenial(operation,reason){
+    await runtimePool.query('select public.storage_record_anonymous_denial($1,$2)',[operation,reason]);
+  }
+  async function actorDenial(s,operation,reason){
+    await withActorTransaction(runtimePool,s.user.id,db=>db.query('select public.storage_record_access_denial($1,$2)',[operation,reason]));
+  }
+  // A failed auth lookup cannot identify an actor or distinguish missing from expired.
+  async function auditedSession(headers,operation){
+    try {return await session(headers);}
+    catch(error){await anonymousDenial(operation,error?.message==='UNAUTHENTICATED'?'unauthenticated':'auth_unavailable');throw error;}
+  }
+  async function audited(headers,operation,work){
+    const s=await auditedSession(headers,operation);
+    try {return await work(s);}
+    catch(error){await actorDenial(s,operation,error?.message?.startsWith('INVALID_')?'validation':'access');throw error;}
+  }
+  // Route-level rejections never include selectors or request content. Origin
+  // failures are intentionally anonymous: an attacker can cause them with a cookie.
+  async function recordRequestDenial({headers,operation,reason}){
+    if(reason==='origin')return anonymousDenial(operation,'origin');
+    const s=await auditedSession(headers,operation);
+    return actorDenial(s,operation,reason==='validation'?'validation':'access');
+  }
+  async function upload(input){return audited(input.headers,'upload',()=>doUpload(input));}
+  async function list(input){return audited(input.headers,'list',()=>doList(input));}
+  async function grant({headers,id}){
+    return audited(headers,'grant',s=>withActorTransaction(runtimePool,s.user.id,async db=>{await lock(db,id,'read');throw Error('NOT_AVAILABLE');}));
+  }
+  async function download({headers,id,grant:token,preview=false}){
+    return audited(headers,preview?'preview':'download',async s=>{validate(token,id,s.session.id);return withActorTransaction(runtimePool,s.user.id,async db=>{await lock(db,id,'read');throw Error('NOT_AVAILABLE');});});
+  }
+  async function doRemove({headers,id}){const s=await session(headers);await withActorTransaction(runtimePool,s.user.id,async db=>{const d=await lock(db,id,'delete');if(d.storage_status==='deleted'||d.storage_status==='deleting')return;if(!['structurally_valid_unscanned','verified','revoked'].includes(d.storage_status))throw Error('INVALID_STATE');await transition(db,id,'deleting');});return withActorTransaction(runtimePool,s.user.id,async db=>{const d=await lock(db,id,'delete');if(d.storage_status==='deleted')return;if(d.storage_status!=='deleting')throw Error('INVALID_STATE');await store.delete(d.storage_area,d.storage_path);await transition(db,id,'deleted');});}
+  async function doCleanup({headers,businessId}){return withVerifiedBusiness({auth,runtimePool,headers,businessId,allowedRoles:['owner','admin'],work:async db=>{await db.query('select public.storage_authorize_cleanup($1)',[businessId]);let cleaned=0;const rows=(await db.query("select id from public.documents where business_id=$1 and ((storage_status='quarantine' and storage_expires_at<=now()) or storage_status='deleting')",[businessId])).rows;for(const row of rows){const d=await lock(db,row.id,'delete');if(d.storage_status==='quarantine'&&new Date(d.storage_expires_at).getTime()<=clock()){await store.delete(d.storage_area,d.storage_path);await transition(db,d.id,'abandoned');cleaned++;}else if(d.storage_status==='deleting'){await store.delete(d.storage_area,d.storage_path);await transition(db,d.id,'deleted');cleaned++;}}
     for(const area of areas){for(const key of await store.list(area,`${businessId.toLowerCase()}/`)){if(!new RegExp(`^${businessId.toLowerCase()}/[0-9a-f-]{36}$`).test(key))continue;const existing=await db.query('select 1 from public.documents where business_id=$1 and storage_area=$2 and storage_path=$3 and storage_status not in ($4,$5)',[businessId,area,key,'deleted','abandoned']);if(!existing.rowCount){await store.delete(area,key);cleaned++;}}}return {cleaned};}});}
-  return {upload,list,grant,download,remove,cleanup};
+  async function remove(input){return audited(input.headers,'delete',()=>doRemove(input));}
+  async function cleanup(input){return audited(input.headers,'cleanup',()=>doCleanup(input));}
+  return {upload,list,grant,download,remove,cleanup,recordRequestDenial};
 }

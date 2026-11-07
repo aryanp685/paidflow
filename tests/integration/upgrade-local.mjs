@@ -13,5 +13,15 @@ try{
  await test('historical idempotent payment replay works after reclassification',async()=>{const r=(await withActorTransaction(pool,user,c=>q(c,"select public.record_payment($1,$2,$3,200,'2026-05-01','upi',null,$4,null) r",[business,invoice,key,doc]))).rows[0].r;assert.equal(r.replayed,true);assert.equal(r.payment.id,paymentBefore.id);});
  await test('new payment with historical unscanned proof rejected atomically',async()=>{await assert.rejects(()=>withActorTransaction(pool,user,c=>q(c,"select public.record_payment($1,$2,$3,1,'2026-05-01','upi',null,$4,null)",[business,invoice,randomUUID(),doc])),e=>e.code==='23514');assert.deepEqual((await q(db,'select * from public.invoices where id=$1',[invoice])).rows[0],invoiceBefore);assert.equal((await q(db,'select count(*)::int n from public.payments where invoice_id=$1',[invoice])).rows[0].n,1);});
  await test('historical proof retained while recorded and after void',async()=>{await assert.rejects(()=>withActorTransaction(pool,user,c=>q(c,"select public.storage_transition($1,'revoked')",[doc])),e=>e.code==='23503');const r=(await withActorTransaction(pool,user,c=>q(c,"select public.void_payment($1,$2,'Synthetic void') r",[business,paymentBefore.id]))).rows[0].r;assert.equal(r.payment.status,'voided');assert.equal(r.invoice.paid_paise,0);assert.equal(r.invoice.balance_paise,1000);await assert.rejects(()=>withActorTransaction(pool,user,c=>q(c,"select public.storage_transition($1,'deleting')",[doc])),e=>e.code==='23503');});
+ const historyBefore=(await q(db,'select to_jsonb(p) p from public.payments p where id=$1',[paymentBefore.id])).rows[0].p;
+ const logsBefore=(await q(db,'select * from public.activity_logs where business_id=$1 order by id',[business])).rows;
+ await q(db,'set role paidflow_migrator');await q(db,await readFile('storage-lab/migrations/20261107040000_storage_access_denials.sql','utf8'));await q(db,'reset role');
+ await test('additive denial audit migration preserves payment and prior audit history',async()=>{
+   assert.deepEqual((await q(db,'select to_jsonb(p) p from public.payments p where id=$1',[paymentBefore.id])).rows[0].p,historyBefore);
+   assert.deepEqual((await q(db,'select * from public.activity_logs where business_id=$1 order by id',[business])).rows,logsBefore);
+   await withActorTransaction(pool,user,c=>q(c,"select public.storage_record_access_denial('grant')"));
+   const rows=(await q(db,'select actor_user_id,operation from paidflow_private.storage_access_denials')).rows;
+   assert.deepEqual(rows,[{actor_user_id:user,operation:'grant'}]);
+ });
 }finally{if(pool)await pool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}" with (force)`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
 console.log(`\n${passed} passed; ${failed} failed. Local synthetic Step 2C upgrade only.`);if(failed)process.exitCode=1;
