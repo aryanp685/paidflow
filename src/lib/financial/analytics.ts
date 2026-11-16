@@ -15,7 +15,7 @@ export function invoiceAnalytics(rows: AnalyticsInvoice[], today: string) {
     { label: "61–90 days overdue", count: 0, balance: 0n },
     { label: "91+ days overdue", count: 0, balance: 0n },
   ];
-  let outstanding = 0n, overdue = 0n, outstandingCount = 0, overdueCount = 0;
+  let outstanding = 0n, overdue = 0n, dueNext7 = 0n, outstandingCount = 0, overdueCount = 0, dueNext7Count = 0;
   for (const row of rows) {
     if (!row || typeof row.id !== "string" || !row.id || seen.has(row.id) || !z.iso.date().safeParse(row.due_date).success) throw new Error("Invalid invoice data");
     seen.add(row.id);
@@ -30,8 +30,10 @@ export function invoiceAnalytics(rows: AnalyticsInvoice[], today: string) {
     buckets[index].count++; buckets[index].balance += amount;
     outstandingCount++; outstanding += amount;
     if (days > 0) { overdueCount++; overdue += amount; }
+    // Includes the India as-of date and the following six calendar days.
+    if (days <= 0 && days >= -6) { dueNext7Count++; dueNext7 += amount; }
   }
-  return { invoiceCount: rows.length, outstandingCount, overdueCount, outstanding, overdue, buckets };
+  return { invoiceCount: rows.length, outstandingCount, overdueCount, dueNext7Count, outstanding, overdue, dueNext7, buckets };
 }
 
 /** Business-facing date uses India time, independent of server timezone. */

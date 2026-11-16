@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { reminderSubjects, type ReminderLanguage, type ReminderTemplates } from "@/lib/reminders/templates";
+import { reminderSubjects, reminderVariantLabels, type ReminderLanguage, type ReminderTemplates, type ReminderVariant, type ReminderVariants } from "@/lib/reminders/templates";
 
 function whatsappNumber(value: string): string | null {
   const trimmed = value.trim();
@@ -12,10 +12,12 @@ function emailAddress(value: string): string | null {
   if (trimmed.length > 254 || !/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(trimmed)) return null;
   return trimmed;
 }
-export function ReminderComposer({ templates }: { templates: ReminderTemplates }) {
+export function ReminderComposer({ templates, variants }: { templates: ReminderTemplates; variants?: ReminderVariants }) {
   const [language, setLanguage] = useState<ReminderLanguage>("en");
-  const [messages, setMessages] = useState<ReminderTemplates>(() => ({ ...templates }));
-  const message = messages[language];
+  const [variant, setVariant] = useState<ReminderVariant>("general");
+  const [messages, setMessages] = useState<ReminderVariants>(() => ({ ...variants, general: { ...templates } }));
+  const message = (messages[variant] ?? messages.general)[language];
+  const availableVariants = (["general", "upcoming", "today", "overdue"] as const).filter(item => messages[item]);
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
@@ -42,9 +44,10 @@ export function ReminderComposer({ templates }: { templates: ReminderTemplates }
   }
   return <section className="customer-form reminder-composer" aria-labelledby="compose-reminder-title">
     <div className="customer-form-intro"><h2 id="compose-reminder-title">Review and edit</h2><p>Drafts in English, Hindi and Marathi are editable starting points. Review the wording and details before sharing. Edits stay on this page only and are discarded when you leave.</p></div>
-    <div className="reminder-language"><label htmlFor="reminder-language">Draft language</label><select id="reminder-language" value={language} onChange={e => { const value = e.target.value; if (value === "en" || value === "hi" || value === "mr") { setLanguage(value); invalidateCopyStatus(); } }}><option value="en">English</option><option value="hi">हिन्दी (Hindi)</option><option value="mr">मराठी (Marathi)</option></select><p>Switching keeps your edits for each language until you leave this page.</p></div>
+    {availableVariants.length > 1 && <div className="reminder-language"><label htmlFor="reminder-variant">Draft type</label><select id="reminder-variant" value={variant} onChange={e => { const value = e.target.value as ReminderVariant; if (availableVariants.includes(value)) { setVariant(value); invalidateCopyStatus(); } }}>{availableVariants.map(item => <option key={item} value={item}>{reminderVariantLabels[item]}</option>)}</select><p>Date-specific drafts use the date at page load. Check the date and balance before sharing.</p></div>}
+    <div className="reminder-language"><label htmlFor="reminder-language">Draft language</label><select id="reminder-language" value={language} onChange={e => { const value = e.target.value; if (value === "en" || value === "hi" || value === "mr") { setLanguage(value); invalidateCopyStatus(); } }}><option value="en">English</option><option value="hi">हिन्दी (Hindi)</option><option value="mr">मराठी (Marathi)</option></select><p>Switching keeps your edits for each draft type and language until you leave this page.</p></div>
     <label className="reminder-message-label" htmlFor="reminder-message">Message</label>
-    <textarea id="reminder-message" rows={8} maxLength={2000} lang={language} value={message} onChange={e => { const value = e.target.value; setMessages(current => ({ ...current, [language]: value })); invalidateCopyStatus(); }} />
+    <textarea id="reminder-message" rows={8} maxLength={2000} lang={language} value={message} onChange={e => { const value = e.target.value; setMessages(current => ({ ...current, [variant]: { ...(current[variant] ?? current.general), [language]: value } })); invalidateCopyStatus(); }} />
     {!canShare && <p className="draft-help">Enter a valid message of up to 2,000 characters to copy or open an app.</p>}
     <div className="reminder-copy"><button type="button" disabled={!canShare || copying} onClick={copy}>{copying ? "Copying…" : "Copy message"}</button><p role="status">{copyStatus}</p></div>
     <div className="reminder-share"><h3>Optional: open your messaging app</h3><p>Enter the recipient yourself and check it carefully. Opening WhatsApp shares the number and message with WhatsApp and may leave them in browser history. Opening email passes the address and message to your email app. You must review and send there; delivery is not tracked.</p>

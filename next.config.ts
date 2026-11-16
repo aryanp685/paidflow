@@ -8,8 +8,9 @@ if (process.env.NODE_ENV === "production" && Object.keys(process.env).some(key =
 validatePublicEnvironment();
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1", "*.e2b.app"],
-  // Better Auth email links carry one-time tokens in URLs. Do not log lab requests.
-  logging: { incomingRequests: { ignore: [/\/(?:api\/)?better-auth-lab(?:\/|\?|$)/, /\/api\/storage-lab(?:\/|\?|$)/] } },
+  // Auth callback URLs can contain one-time codes. Suppress these in Next's
+  // development request logging; this does not control upstream/proxy logs.
+  logging: { incomingRequests: { ignore: [/\/(?:api\/)?better-auth-lab(?:\/|\?|$)/, /\/api\/storage-lab(?:\/|\?|$)/, /^\/auth\/callback(?:\?|$)/] } },
   async headers() { return ["/better-auth-lab/:path*", "/api/better-auth-lab/:path*", "/api/storage-lab/:path*"].map(source => ({source, headers: [
     {key:"Referrer-Policy",value:"no-referrer"}, {key:"Cache-Control",value:"no-store"}, {key:"X-Robots-Tag",value:"noindex, nofollow"},
   ]})); },

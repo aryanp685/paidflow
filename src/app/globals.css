@@ -154,3 +154,10 @@ button { font: inherit; cursor: pointer; }
 .customer-details { display:flex; flex-wrap:wrap; gap:18px 32px; padding:18px 25px; color:#4c5768; font-size:12px; overflow-wrap:anywhere; }
 .customer-details dt { color:#687487; font-weight:700; }.customer-details dd { margin-top:5px; }
 @media(max-width:600px) { .customer-search label { flex:1 1 100%; }.customer-search input,.customer-search select { width:100%; } }
+
+/* Collections due-date filters. */
+.collections-filters { display:flex; flex-wrap:wrap; gap:8px; padding:18px 25px 0; }
+.collections-filters a { padding:9px 13px; border:1px solid #e9e8f3; border-radius:7px; color:#6e788a; font-size:11px; font-weight:700; }
+.collections-filters a:hover,.collections-filters a.selected { background:#f0effb; color:#514bab; border-color:#e3e0f7; }
+.collections-explanation { padding:14px 25px 20px; color:#8995a6; font-size:11px; line-height:1.6; }
+@media(max-width:600px) { .collections-filters { padding-inline:16px; } .collections-explanation { padding-inline:16px; } }
