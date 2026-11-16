@@ -1,6 +1,6 @@
 # PAIDFLOW
 
-PAIDFLOW is a planned India-first receivables workspace. This repository currently contains **Steps 1A–1C in progress**: a marketing preview, frontend components, local-only database migrations and a Supabase Auth/onboarding implementation awaiting real local Supabase integration testing. All financial figures and activities displayed are illustrative, not business records. Features, prices, and security controls described on the page are planned, not yet operational.
+PAIDFLOW is a planned India-first receivables workspace. The checkout contains a marketing preview and unapproved local candidates for authentication, customer, invoice, payment, reminder, analytics and team workflows. Marketing figures are illustrative; workspace pages can display tenant records when configured and must not be treated as demo-only. The repository is **not approved for release**: Supabase Auth + Database is the selected target, but provider/source-of-truth verification is pending, Item 13 is not accepted, Item 14 is on hold and proof security has known failures. See [the execution checklist](docs/ROADMAP_EXECUTION_THROUGH_28.md), [security gaps](docs/security-gaps.md) and [release readiness](docs/release-readiness.md).
 
 ## Local development
 
@@ -26,7 +26,7 @@ npx playwright install chromium # browser and operating-system libraries require
 npm run test:e2e               # serves the production build on port 3000
 ```
 
-The Playwright suite uses an existing server on port 3000 if one is already running. To use a separately installed Chromium binary, set `CHROMIUM_PATH` before running it. The marketing page is statically rendered. Auth and onboarding use Supabase when configured, but are disabled without configuration and remain unverified against real Supabase. Business modules are not implemented.
+The default Playwright suite can reuse an existing server on port 3000; use only an isolated synthetic environment and inspect its configuration first. Authenticated customer browser verification additionally requires the pinned Playwright Chromium revision and an isolated fixture; see [browser prerequisites](docs/item-13.5-browser-prerequisites.md). Local business-module candidates and Supabase-based auth/onboarding exist, but their presence does not establish real-provider verification or deployment.
 
 ## Structure
 
@@ -35,18 +35,18 @@ The Playwright suite uses an existing server on port 3000 if one is already runn
 - `src/components/ui/` — reusable shadcn-style Radix UI primitives.
 - `src/components/marketing/` — page sections and interactive preview.
 - `src/components/shared/` — future product interface foundations.
-- `supabase/migrations/` — local-only PostgreSQL schema, RLS and transactional functions.
+- `supabase/migrations/` — local schema, RLS and transactional functions, including unapproved customer proposals 012–016. Local files do not establish hosted migration state.
 - `docs/database-architecture.md`, `docs/database-security.md`, `docs/database-testing.md` — design and verification guidance.
 - `tests/unit/`, `tests/e2e/` and `tests/database/` — unit, browser and database checks.
 
 ## Availability and security
 
-Signup and login routes require an explicitly configured Supabase environment; contact details, privacy policy and terms are not published. No fake authentication is provided. Security copy describes design intentions only. No deployment or Supabase resources are configured in this step.
+Signup and login routes use the existing Supabase path when explicitly configured; contact details, privacy policy and terms are not published. No fake authentication is provided. Security copy describes design intentions only. No deployment or provider configuration is authorized by this README.
 
 ## Database foundation
 
-No cloud database is connected. See [database testing](docs/database-testing.md) for the disposable local PostgreSQL test runner, local Supabase instructions and explicit limitations. Demo seeding is disabled by default.
+Current hosted database state has not been inspected in this pass. See [database testing](docs/database-testing.md) for the disposable local PostgreSQL test runner, local Supabase instructions and explicit limitations. Demo seeding is disabled by default. Never use real customer data in the synthetic test runners.
 
 ## Auth and onboarding
 
-See [authentication and onboarding](docs/auth-onboarding.md) for public-only environment configuration, local setup and outstanding real-Supabase tests. No cloud project has been configured.
+See [authentication and onboarding](docs/auth-onboarding.md) for public-only environment configuration, local setup and outstanding real-provider tests. Historical cloud activity does not establish current provider configuration.

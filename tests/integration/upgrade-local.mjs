@@ -1,5 +1,5 @@
 // Step 2C -> 2D.1 upgrade using only a disposable local DB and synthetic fixtures.
-import pg from 'pg';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {readdir,readFile} from 'node:fs/promises';import {withActorTransaction} from '../../neon/runtime/with-actor.mjs';
+import pg from 'pg';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {readdir,readFile} from 'node:fs/promises';import {withActorTransaction} from '../../neon/runtime/with-actor.mjs';import {createStorageLab} from '../../storage-lab/core.mjs';import {legacyGrant} from '../storage-lab/legacy-grant.mjs';
 const source=process.env.PAIDFLOW_INTEGRATION_TEST_DATABASE_URL;if(!source||!process.argv.includes('--standalone'))throw Error('Use a dedicated disposable local cluster and --standalone');const uri=new URL(source);if(uri.search||uri.hash||!['127.0.0.1','localhost','::1','[::1]'].includes(uri.hostname))throw Error('Refusing non-loopback or parameterized database URL; never use a tunnel');
 const {Client,Pool}=pg,admin=new Client({connectionString:source}),dbname=`paidflow_upgrade_${process.pid}_${Date.now()}`,dburl=new URL(uri);dburl.pathname=`/${dbname}`;const runtimeUrl=new URL(dburl);runtimeUrl.username='paidflow_runtime';runtimeUrl.password='';const q=(c,s,p=[])=>c.query(s,p);let db,pool,madeDb=false,roles=[],passed=0,failed=0;async function test(name,fn){try{await fn();passed++;console.log('PASS '+name);}catch(e){failed++;console.error('FAIL '+name+': '+e.message.split('\n')[0]);}}
 try{
@@ -39,5 +39,17 @@ try{
    assert.deepEqual((await q(db,'select * from public.activity_logs where business_id=$1 order by id',[business])).rows,logsBefore);
    assert.equal((await withActorTransaction(pool,user,c=>q(c,'select * from public.storage_tenant_denials($1)',[business]))).rows.length,0);
  });
-}finally{if(pool)await pool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}" with (force)`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
+ await test('reclassified historical proof remains inaccessible; voided payment and history survive',async()=>{
+   let reads=0;const secret='synthetic-secret-'.repeat(3),sessionId='synthetic-upgrade-session';
+   const auth={api:{getSession:async()=>({user:{id:user,emailVerified:true},session:{id:sessionId}})}};
+   const store={get:async()=>{reads++;throw Error('unexpected object read');}};
+   const storage=createStorageLab({auth,runtimePool:pool,store,secret});
+   const grant=legacyGrant({secret,id:doc,sessionId,exp:Date.now()+30000});
+   await assert.rejects(()=>storage.grant({headers:new Headers(),id:doc}),/NOT_AVAILABLE/);
+   for(const preview of [false,true])await assert.rejects(()=>storage.download({headers:new Headers(),id:doc,grant,preview}),/NOT_AVAILABLE/);
+   assert.equal(reads,0);assert.deepEqual((await q(db,'select to_jsonb(p) p from public.payments p where id=$1',[paymentBefore.id])).rows[0].p,historyBefore);
+   assert.deepEqual((await q(db,'select * from public.activity_logs where business_id=$1 order by id',[business])).rows,logsBefore);
+   assert.equal((await q(db,'select storage_status from public.documents where id=$1',[doc])).rows[0].storage_status,'structurally_valid_unscanned');
+ });
+}finally{if(pool)await pool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}"`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
 console.log(`\n${passed} passed; ${failed} failed. Local synthetic Step 2C upgrade only.`);if(failed)process.exitCode=1;

@@ -11,9 +11,31 @@ mkdir -p "$root/work" "$root/usr" "$root/lib" "$root/lib64" "$root/proc" "$root/
 # Only reviewed project sources and tests, not .git, env files or other projects.
 git ls-files -z -- src tests neon/runtime better-auth-lab/core.mjs storage-lab package.json package-lock.json tsconfig.json vitest.config.mts | tar --null -T - -cf - | tar -xf - -C "$root/work"
 # Explicit new tests may not yet be tracked in the working tree.
-for f in tests/storage-lab/legacy-grant.mjs tests/storage-lab/download-hold-offline.mjs tests/unit/document-manager.test.tsx tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts tests/unit/supabase-pkce-sdk.test.ts tests/unit/document-history.test.tsx src/components/storage-lab/document-history.tsx src/app/api/storage-lab/history/route.ts src/components/storage-lab/document-security-events.tsx src/app/api/storage-lab/security-events/route.ts tests/unit/document-security-events.test.tsx; do
+for f in tests/storage-lab/legacy-grant.mjs tests/storage-lab/download-hold-offline.mjs tests/unit/document-manager.test.tsx tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts tests/unit/supabase-pkce-sdk.test.ts tests/unit/document-history.test.tsx src/components/storage-lab/document-history.tsx src/app/api/storage-lab/history/route.ts src/components/storage-lab/document-security-events.tsx src/app/api/storage-lab/security-events/route.ts tests/unit/document-security-events.test.tsx scripts/verify-supabase-auth-archive.py tests/supabase-auth/test_archive_verifier.py tests/supabase-auth/mail_capture.py tests/supabase-auth/test_mail_capture.py tests/dependency/minimatch-compat.mjs; do
   if [ -f "$f" ]; then mkdir -p "$root/work/$(dirname "$f")"; cp "$f" "$root/work/$f"; fi
 done
+# Reviewed roadmap candidates may be untracked. Stage only the explicit manifest,
+# never arbitrary untracked files or symlinks. Fail rather than silently run a
+# smaller suite if a required candidate disappears. Review the manifest whenever
+# the isolated test surface changes.
+while IFS= read -r f || [ -n "$f" ]; do
+  [ -n "$f" ] || continue
+  case "$f" in /*|../*|*/../*|*/..) echo 'Invalid roadmap manifest path' >&2; exit 1;; esac
+  [ -f "$f" ] && [ ! -L "$f" ] || { echo "Missing or symlinked roadmap file: $f" >&2; exit 1; }
+  resolved=$(realpath "$f")
+  case "$resolved" in "$repo"/*) ;; *) echo "Roadmap file escapes repository: $f" >&2; exit 1;; esac
+  mkdir -p "$root/work/$(dirname "$f")"
+  cp "$f" "$root/work/$f"
+done < scripts/offline-roadmap-files.txt
+# Vitest discovers these files by path. Fail closed if any local unit test was
+# not staged rather than reporting a smaller suite as complete.
+find tests/unit -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) -print | LC_ALL=C sort > "$root/expected-unit-tests"
+(cd "$root/work" && find tests/unit -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) -print | LC_ALL=C sort) > "$root/staged-unit-tests"
+if ! cmp -s "$root/expected-unit-tests" "$root/staged-unit-tests"; then
+  echo 'Offline unit-test staging differs from the local suite; review the manifest.' >&2
+  diff -u "$root/expected-unit-tests" "$root/staged-unit-tests" >&2 || true
+  exit 1
+fi
 # Optional known synthetic fixture for encrypted-PDF regression; never stage arbitrary data.
 if [ -n "${PAIDFLOW_ENCRYPTED_PDF_FIXTURE:-}" ]; then
   fixture=$(realpath "$PAIDFLOW_ENCRYPTED_PDF_FIXTURE")
@@ -52,6 +74,9 @@ env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent \
       /usr/bin/sh -eu -c '\''
         cd /work
         node -e "const fs=require(\"fs\"),net=require(\"net\"),os=require(\"os\"); if(!/CapEff:\s+0+\b/.test(fs.readFileSync(\"/proc/self/status\",\"utf8\")))process.exit(4); if(fs.existsSync(\"/home/user\")||fs.existsSync(\"/run/user\")||fs.existsSync(\"/work/.git\")||process.env.AWS_SECRET_ACCESS_KEY)process.exit(1); const s=net.connect(80,\"1.1.1.1\");s.on(\"connect\",()=>process.exit(2));s.on(\"error\",e=>{if(e.code!==\"ENETUNREACH\")process.exit(3);console.log(\"Isolation probe: no external network route; host home, run sockets, git and inherited credentials absent\");});"
+        PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/supabase-auth -p "test_archive_verifier.py" -v
+        PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/supabase-auth -p "test_mail_capture.py" -v
+        node tests/dependency/minimatch-compat.mjs
         node tests/storage-lab/download-hold-offline.mjs
         if [ -f /work/encrypted-test.pdf ]; then
           PAIDFLOW_ENCRYPTED_PDF_FIXTURE=/work/encrypted-test.pdf node tests/storage-lab/security-evaluation-offline.mjs
@@ -61,3 +86,7 @@ env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent \
         node node_modules/vitest/vitest.mjs run --configLoader runner
       '\''
   ' sh "$root" "$repo"
+# A successful run includes removal of the staged workspace.
+rm -rf "$root"
+trap - EXIT HUP INT TERM
+echo 'Offline test jail cleanup complete.'

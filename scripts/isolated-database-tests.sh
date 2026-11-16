@@ -15,10 +15,23 @@ mkdir -p "$root/work" "$root/usr" "$root/lib" "$root/lib64" "$root/proc" "$root/
 printf 'tester:x:1001:1001:tester:/tmp:/bin/sh\n' > "$root/etc/passwd"
 printf 'tester:x:1001:\n' > "$root/etc/group"
 git ls-files -z -- src tests neon better-auth-lab storage-lab supabase package.json package-lock.json tsconfig.json vitest.config.mts | tar --null -T - -cf - | tar -xf - -C "$root/work"
+# Include the untracked candidate migration without staging the whole workspace.
+cp supabase/migrations/20261107000700_deny_payment_proof_attachment.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107000800_non_gst_invoice_draft.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107000900_hold_invoice_issuance.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107001000_idempotent_customer_create.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107001100_member_access_compare_and_set.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107001200_customer_versioned_edits.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107001300_customer_duplicate_policy.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107001400_customer_update_audit.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107001500_customer_gstin_validation.sql "$root/work/supabase/migrations/"
+cp supabase/migrations/20261107001600_customer_compatibility_review.sql "$root/work/supabase/migrations/"
 for f in storage-lab/migrations/20261107040000_storage_access_denials.sql storage-lab/migrations/20261107050000_document_history_reader.sql storage-lab/migrations/20261107060000_tenant_denial_reader.sql; do
   [ ! -f "$f" ] || cp "$f" "$root/work/storage-lab/migrations/"
 done
 for f in tests/unit/auth-security.test.ts tests/unit/recovery-ui.test.tsx tests/unit/storage-audit-routes.test.ts tests/unit/supabase-pkce-sdk.test.ts tests/unit/document-history.test.tsx src/components/storage-lab/document-history.tsx src/app/api/storage-lab/history/route.ts src/components/storage-lab/document-security-events.tsx src/app/api/storage-lab/security-events/route.ts tests/unit/document-security-events.test.tsx; do [ ! -f "$f" ] || { mkdir -p "$root/work/$(dirname "$f")"; cp "$f" "$root/work/$f"; }; done
+mkdir -p "$root/work/tests/unit"
+cp tests/unit/customer-gstin-vectors.json "$root/work/tests/unit/"
 cp -a "$pg_dir/." "$root/pg/"
 mkdir -p "$root/work/node_modules"
 ln -s usr/bin "$root/bin"
@@ -57,5 +70,13 @@ env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent \
   PAIDFLOW_INTEGRATION_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55435/postgres node tests/integration/run-local.mjs --standalone
   PAIDFLOW_INTEGRATION_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55435/postgres node tests/integration/upgrade-local.mjs --standalone
   PAIDFLOW_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:55435/postgres node tests/database/run-tests.mjs --standalone
+  pg_ctl -D /tmp/pgdata -m fast stop >/dev/null
+  trap - EXIT
+  [ -z "$(ss -H -lnt)" ]
+  echo "Synthetic database services stopped; no listeners remain."
  '\''
  ' sh "$root" "$repo"
+# A successful run includes removal of the staged workspace.
+rm -rf "$root"
+trap - EXIT HUP INT TERM
+echo 'Synthetic database jail cleanup complete.'
