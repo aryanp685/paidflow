@@ -1,0 +1,12 @@
+[
+  {"value":"01ABCDE1234F1ZE","valid":true},
+  {"value":"27ABCDE1234F1Z0","valid":true},
+  {"value":"29ABCDE1234F1ZW","valid":true},
+  {"value":"38ABCDE1234F1ZX","valid":true},
+  {"value":"00ABCDE1234F1ZG","valid":false},
+  {"value":"39ABCDE1234F1Z0","valid":false},
+  {"value":"27ABCDE1234F1Z5","valid":false},
+  {"value":"27XXXXXXXXXXXXX","valid":false},
+  {"value":"27abcde1234f1z0","valid":false},
+  {"value":"BAD","valid":false}
+]

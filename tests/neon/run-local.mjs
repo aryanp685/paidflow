@@ -12,7 +12,7 @@ const suffix = `${process.pid}_${Date.now()}`;
 const dbname = `paidflow_neon_${suffix}`, refname = `paidflow_reference_${suffix}`;
 const admin = new Client({connectionString:base});
 let db, ref, runtime, madeDb=false, madeRef=false, rolesMade=[];
-let passed=0, failed=0;
+let passed=0, failed=0, knownGaps=0;
 // pg can emit late idle-client errors when the disposable DB is dropped. Do not
 // dump connection internals (which can contain sensitive values) to the log.
 let shuttingDown=false;
@@ -21,7 +21,7 @@ const dburl = new URL(base); dburl.pathname=`/${dbname}`;
 const refurl = new URL(base); refurl.pathname=`/${refname}`;
 const runtimeUrl = new URL(dburl); runtimeUrl.username='paidflow_runtime'; runtimeUrl.password='';
 const ids = Object.fromEntries(['ownerA','ownerB','admin','manager','accountant','viewer','suspended','fresh','rollback','unverified','a','b','ca','cb','ia','ib'].map(x=>[x,randomUUID()]));
-const test = async (name, fn) => { try { await fn(); passed++; console.log(`PASS ${name}`); } catch(e) { failed++; console.error(`FAIL ${name}: ${e.message}`); } };
+const test = async (name, fn) => { try { await fn(); if(name.startsWith('KNOWN GAP:')) { knownGaps++; console.log(`VULNERABILITY DEMONSTRATED (not a security pass): ${name}`); } else { passed++; console.log(`PASS ${name}`); } } catch(e) { failed++; console.error(`FAIL ${name}: ${e.message}`); } };
 const q = (c, sql, params=[])=>c.query(sql,params);
 async function withActor(actor, fn, pool=runtime) {
   if (actor) return withActorTransaction(pool, actor, fn);
@@ -54,7 +54,9 @@ try {
   for(const f of await files('neon/migrations')) { await q(db,await readFile(`neon/migrations/${f}`,'utf8')); console.log(`APPLIED LOCAL ${f}`); }
   await q(db,'RESET ROLE');
   await q(ref,await readFile('tests/database/bootstrap-standalone.sql','utf8'));
-  for(const f of await files('supabase/migrations')) await q(ref,await readFile(`supabase/migrations/${f}`,'utf8'));
+  // Compare to the original six Supabase migrations, not later production-only
+  // controls: the isolated Neon lab intentionally does not import those.
+  for(const f of (await files('supabase/migrations')).filter(f=>f <= '20261107000600_auth_onboarding.sql')) await q(ref,await readFile(`supabase/migrations/${f}`,'utf8'));
   runtime=makePool({connectionString:runtimeUrl.toString(),max:12});
   await test('17 public core tables, columns, defaults, constraints, indexes and triggers match original reference',async()=>{
     const a=await schemaSnapshot(db),b=await schemaSnapshot(ref);
@@ -75,6 +77,28 @@ try {
     await withActor(u,c=>q(c,"insert into public.invoice_items(business_id,invoice_id,description,quantity,unit_price_paise,taxable_paise,line_total_paise) values($1,$2,'Fictional service',1,1000,1000,1000)",[b,i]));
     await withActor(u,c=>q(c,'select public.issue_invoice($1,$2)',[b,i]));
   }
+  // SECURITY GAP regression: base Neon schema lacks a scan gate. This passes
+  // only to demonstrate a known unsafe acceptance, never as acceptance criteria.
+  await test('KNOWN GAP: base Neon schema accepts same-invoice proof without a scan',async()=>{
+    const columns=(await q(db,"select column_name from information_schema.columns where table_schema='public' and table_name='documents' and column_name in ('storage_status','scan_status')")).rows;
+    assert.equal(columns.length,0);const doc=randomUUID(),key=randomUUID();let demonstrated=false;
+    await assert.rejects(()=>withActor(ids.manager,async c=>{
+      await q(c,"insert into public.documents(id,business_id,invoice_id,category,file_name,storage_path,mime_type,file_size_bytes) values($1,$2,$3,'other','unscanned.txt',$4,'text/plain',1)",[doc,ids.a,ids.ia,`${ids.a}/${doc}`]);
+      const r=(await q(c,"select public.record_payment($1,$2,$3,1,'2026-05-01','upi',null,$4) result",[ids.a,ids.ia,key,doc])).rows[0].result;
+      assert.equal(r.payment.proof_document_id,doc);assert.equal(r.payment.verification_status,'proof_attached');demonstrated=true;throw Error('synthetic rollback');
+    }),/synthetic rollback/);assert.equal(demonstrated,true);
+    assert.equal((await q(db,'select count(*)::int n from public.payments where idempotency_key=$1',[key])).rows[0].n,0);
+  });
+  await test('base Neon composite FK rejects missing, cross-tenant and different-invoice proofs',async()=>{
+    const cross=randomUUID(),other=randomUUID(),differentInvoice=randomUUID();
+    await q(db,"insert into public.invoices(id,business_id,customer_id,invoice_number,invoice_date,due_date,fy_start_year,origin_state_code,place_of_supply_state_code,created_by) values($1,$2,$3,'OTHER-PROOF','2026-04-01','2026-04-16',2026,'27','27',$4)",[differentInvoice,ids.a,ids.ca,ids.ownerA]);
+    for(const [id,business,invoice,actor] of [[cross,ids.b,ids.ib,ids.ownerB],[other,ids.a,differentInvoice,ids.ownerA]])
+      await q(db,"insert into public.documents(id,business_id,invoice_id,category,file_name,storage_path,mime_type,file_size_bytes,uploaded_by) values($1,$2,$3,'other','fake.txt',$4,'text/plain',1,$5)",[id,business,invoice,`${business}/${id}`,actor]);
+    const snapshot=async()=>((await q(db,"select (select count(*)::int from public.payments where invoice_id=$1) payments,(select count(*)::int from public.activity_logs where business_id=$2 and action='payment.recorded') audits,(select balance_paise from public.invoices where id=$1) balance",[ids.ia,ids.a])).rows[0]);
+    const before=await snapshot();
+    for(const doc of [cross,other,randomUUID()]) await assert.rejects(()=>withActor(ids.manager,c=>q(c,"select public.record_payment($1,$2,$3,1,'2026-05-01','upi',null,$4)",[ids.a,ids.ia,randomUUID(),doc])),e=>e.code==='23503');
+    assert.deepEqual(await snapshot(),before);
+  });
   await test('missing actor fails closed on reads and privileged RPC',async()=>{assert.equal((await withActor(null,c=>q(c,'select * from public.customers'))).rowCount,0);await denied(null,c=>pay(c,ids.a,ids.ia,randomUUID(),1));});
   await test('invalid actor context cannot authorize',async()=>{await assert.rejects(()=>withActor('not-a-uuid',c=>q(c,'select * from public.customers')), /Verified actor UUID required/);await assert.rejects(()=>withActor(null,async c=>{await q(c,"select set_config('paidflow.actor_id',$1,true)",['invalid']);await q(c,'select * from public.customers');}),e=>e.code==='22P02');});
   await test('owner sees own customer, not another tenant',async()=>{const r=await withActor(ids.ownerA,c=>q(c,'select id from public.customers order by id'));assert.deepEqual(r.rows.map(x=>x.id),[ids.ca]);});
@@ -115,13 +139,13 @@ try {
   await test('profile defaults cannot be changed directly or to another tenant',async()=>{await denied(ids.ownerA,c=>q(c,'update public.profiles set default_business_id=$1 where id=$2',[ids.b,ids.ownerA]));await denied(ids.ownerA,c=>q(c,'select public.set_default_business($1)',[ids.b]));});
 } finally {
   shuttingDown=true;
-  if(runtime) await runtime.end().catch(()=>{});
-  if(db) await db.end().catch(()=>{});
-  if(ref) await ref.end().catch(()=>{});
-  if(madeDb) await q(admin,`DROP DATABASE IF EXISTS "${dbname}" WITH (FORCE)`);
-  if(madeRef) await q(admin,`DROP DATABASE IF EXISTS "${refname}" WITH (FORCE)`);
+  if(runtime) await runtime.end();
+  if(db) await db.end();
+  if(ref) await ref.end();
+  if(madeDb) await q(admin,`DROP DATABASE IF EXISTS "${dbname}"`);
+  if(madeRef) await q(admin,`DROP DATABASE IF EXISTS "${refname}"`);
   for(const name of rolesMade.reverse()) await q(admin,`DROP ROLE ${name}`);
-  await admin.end().catch(()=>{});
+  await admin.end();
 }
-console.log(`\n${passed} passed; ${failed} failed. Disposable local PostgreSQL only; no Neon/Better Auth integration.`);
+console.log(`\n${passed} local checks passed; ${failed} test errors; ${knownGaps} known vulnerabilities demonstrated (security acceptance FAIL). Disposable local PostgreSQL only; no Neon/Better Auth integration.`);
 if(failed) process.exitCode=1;

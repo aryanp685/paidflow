@@ -1,0 +1,29 @@
+# Security gaps and holds
+
+Status 2026-11-06; current working tree is local only. Do not treat a mock test or hold UI as a deployed control.
+
+| Risk | Status / evidence | Required next steps |
+|---|---|---|
+| Unscanned proof attachment | **SECURITY ACCEPTANCE FAIL / BLOCKED** | Baseline disposable mock-Supabase DB demonstrated four distinct unscanned/reused metadata association paths; Neon lab demonstrated one. Candidate Supabase 007 denies new non-null proof association locally; it is undeployed, not a scanner and does not protect Neon. Design production-specific immutable byte/hash/version-bound attestations from a trusted isolated scanner; separate runtime privileges; enforce on direct SQL/RPC, account for revocation, replacement, deletion, races and historical rows. Verify bypass and cross-tenant paths, scanner/provider behavior, fail-closed migration/rollback and operational recovery before reconsidering. See `step-13-security-architecture.md`. |
+| Upload/download/preview | **BLOCKED** | Lab download hold tests reject grants/bytes in all tested states; no trustworthy scanning or real object-store enforcement verified. Do not enable based on structural file validation. |
+| Invoice issuance | **BLOCKED** | Candidate 009 rejects new issuance under ordinary local database execution; undeployed, privileged trigger bypass possible, not history immutability. Tax and financial gates remain. |
+| Password recovery | **BLOCKED** | App UI/update hold is not provider-level disabling of recovery credentials or sessions; caller-controlled flow labels can be removed. Verify real provider flows separately before enabling. See `docs/supabase-recovery-verification.md`. |
+| Team concurrency | **PARTIAL** | Local 011 checks current role/status only (ABA), and existing authenticated `set_member_access` remains callable without that check. Role checks are not a universal CAS guarantee. Review compatibility, direct API, live membership and session behavior before replacing any contract. |
+| Tenant and audit | **NOT VERIFIED** | Synthetic RLS/role checks are not real Supabase Auth/PostgREST; activity log visibility, completeness, privileged writers and retention need independent review. Customer retry ledger contains contact PII. |
+| Dependency findings | **OPEN** | Baseline full npm audit reports 3 high and 1 moderate in the dev/test s3rver chain; production-only audit reports 0 at that time. Avoid exposing the emulator; assess safe compatible replacements and repeat audit. |
+| Browser and provider | **NOT VERIFIED** | Chromium absent; all ten Playwright tests failed to start. Real Supabase/Neon/storage/scanner and hosted migration/rollback were not accessed or verified. |
+
+A test harness exit of zero when it demonstrates an expected vulnerability is **not** a security pass. No cloud changes, migration, installation of scanner/Garage, credential change or hold lifting is authorized by this report.
+
+## Step 10 remediation batch — independent attack classifications
+
+The following statuses distinguish the **unmodified baseline** from an **undeployed, synthetic-only deny-all candidate**. An individual candidate test passing is not an independent review or production security acceptance; each overall item remains **FAIL** until independently fixed and verified, including provider/storage paths.
+
+| Attack | Base / overall | Exact path and missing condition | Candidate synthetic regression |
+|---|---|---|---|
+| Same-invoice unscanned metadata | **FAIL** | Authenticated manager inserts invoice-linked `documents` metadata, then calls security-definer `record_payment`; FK checks only tenant/invoice, not scan or object bytes. | **PASS (local denial only):** `candidate attack 1`, 007 denies payment insert; historical rows and payment/invoice/audit snapshot unchanged. |
+| Accountant attaches manager's metadata-only proof | **FAIL** | Manager registers metadata, accountant invokes the separately granted `record_payment` RPC; payment role is authorized, but there is no trusted proof validation. | **PASS (local denial only):** `candidate attack 2` reproduces this role split and checks unchanged ledger/history. |
+| Previous same-invoice payment proof reused | **FAIL** | Document reverse-linked by `documents.payment_id` to an earlier payment is accepted by a second `record_payment`; no consumption/association check. | **PASS (local denial only):** `candidate attack 3` uses a real pre-hold reverse-linked historical fixture; new association denied and history/ledger unchanged. Denial does not implement a reusable-proof workflow. |
+| Same-invoice `payment_receipt` metadata without verification | **FAIL** | Category and FK permit metadata as proof without any verified scan or object. | **PASS (local denial only):** `candidate attack 4` uses that category and verifies unchanged ledger/history. |
+
+The four baseline demonstrations are separate, run before candidate 007, and use synthetic mock Auth and disposable PostgreSQL only. Candidate 007 prevents all new proof attachments; it neither checks real scanner attestations nor establishes deleted/revoked byte state. It now freezes all metadata on existing forward (`payments.proof_document_id`) and reverse (`documents.payment_id`) links using a hardened-search-path definer lookup; non-concurrent index creation and owner/RLS privileges require rollout review. A historical retry can still return `proof_attached` without proving safety. Invoice-only documents remain registrable and are not treated as verified or attachable. Storage lab's download/preview hold covers test roles and no object read, but is not a Supabase Storage control. Direct privileged storage operations, existing links, superuser/table-owner trigger disabling and replication mode remain outside this safeguard. Privacy/retention/delete obligations and breakage to legitimate metadata edits require independent review.

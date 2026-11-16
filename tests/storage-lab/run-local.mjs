@@ -163,6 +163,23 @@ try{
   });
   await test('viewer cannot use another session grant or clean storage',async()=>{const g=await oldGrant(cookieA,doc.id);await assert.rejects(()=>storage.download({headers:headers(cookieB),id:doc.id,grant:g}),/INVALID_GRANT/);await assert.rejects(()=>storage.cleanup({headers:headers(cookieB),businessId:businessA}));});
   await test('accountant and manager have area-specific permissions',async()=>{await q(db,"update public.business_members set role='accountant' where business_id=$1 and user_id=$2",[businessA,idB]);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:proof.id}),/NOT_AVAILABLE/);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:ocr.id}));await q(db,"update public.business_members set role='manager' where business_id=$1 and user_id=$2",[businessA,idB]);await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:ocr.id}),/NOT_AVAILABLE/);await assert.rejects(()=>storage.remove({headers:headers(cookieB),id:doc.id}));await q(db,"update public.business_members set role='viewer' where business_id=$1 and user_id=$2",[businessA,idB]);});
+  await test('proof download and preview remain held for owner, admin, manager, accountant, viewer and anonymous',async()=>{
+    const get=store.get;let reads=0;store.get=async(...args)=>{reads++;return get(...args);};
+    try {
+      const ownerToken=await oldGrant(cookieA,proof.id);
+      for(const preview of [false,true]) await assert.rejects(()=>storage.download({headers:headers(cookieA),id:proof.id,grant:ownerToken,preview}),/NOT_AVAILABLE/);
+      for(const role of ['admin','manager','accountant','viewer']) {
+        await q(db,'update public.business_members set role=$3 where business_id=$1 and user_id=$2',[businessA,idB,role]);
+        const token=await oldGrant(cookieB,proof.id);
+        for(const preview of [false,true]) {
+          if(role==='viewer') await assert.rejects(()=>storage.download({headers:headers(cookieB),id:proof.id,grant:token,preview}));
+          else await assert.rejects(()=>storage.download({headers:headers(cookieB),id:proof.id,grant:token,preview}),/NOT_AVAILABLE/);
+        }
+      }
+      for(const preview of [false,true]) await assert.rejects(()=>storage.download({headers:new Headers(),id:proof.id,grant:ownerToken,preview}),/UNAUTHENTICATED/);
+      assert.equal(reads,0);
+    } finally {store.get=get;await q(db,"update public.business_members set role='viewer' where business_id=$1 and user_id=$2",[businessA,idB]);}
+  });
   await test('suspension revokes previously issued grant immediately',async()=>{const g=await oldGrant(cookieB,doc.id);await q(db,"update public.business_members set status='suspended' where business_id=$1 and user_id=$2",[businessA,idB]);await assert.rejects(()=>storage.download({headers:headers(cookieB),id:doc.id,grant:g}));await assert.rejects(()=>storage.grant({headers:headers(cookieB),id:doc.id}));await q(db,"update public.business_members set status='active' where business_id=$1 and user_id=$2",[businessA,idB]);});
   await test('expired and tampered download grants fail',async()=>{const g=await oldGrant(cookieA,doc.id);await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g+'x'}),/INVALID_GRANT/);now+=61_000;await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g}),/INVALID_GRANT/);now=Date.now();});
   await test('concurrent idempotent retry writes one document and one upload event',async()=>{const requestId=randomUUID();const [a,b]=await Promise.all([runUpload(cookieA,businessA,'evidence',{requestId}),runUpload(cookieA,businessA,'evidence',{requestId})]);assert.equal(a.id,b.id);const row=(await q(db,"select count(*)::int n from public.activity_logs where entity_id=$1 and action='document.uploaded'",[a.id])).rows[0];assert.equal(row.n,1);await assert.rejects(()=>runUpload(cookieA,businessA,'evidence',{requestId,name:'different.png'}));});
@@ -184,5 +201,5 @@ try{
   });
   await test('runtime cannot mutate document metadata directly',async()=>{await assert.rejects(()=>q(runtimePool,"update public.documents set storage_status='verified'"),e=>e.code==='42501');await assert.rejects(()=>q(runtimePool,"insert into public.documents(business_id,category,file_name,storage_path,mime_type,file_size_bytes) values($1,'other','x','x','image/png',1)",[businessA]),e=>e.code==='42501');});
   await test('expired Better Auth session cannot download, even with grant',async()=>{const g=await oldGrant(cookieA,doc.id);await q(db,'update public."session" set "expiresAt"=now()-interval \'1 second\' where "userId"=$1',[idA]);await assert.rejects(()=>storage.download({headers:headers(cookieA),id:doc.id,grant:g}),/UNAUTHENTICATED/);await assert.rejects(()=>storage.history({headers:headers(cookieA),businessId:businessA}),/UNAUTHENTICATED/);await assert.rejects(()=>storage.tenantDenials({headers:headers(cookieA),businessId:businessA}),/UNAUTHENTICATED/);const r=(await q(db,'select actor_user_id,operation,reason from paidflow_private.storage_access_denials order by id desc limit 1')).rows[0];assert.deepEqual(r,{actor_user_id:null,operation:'download',reason:'unauthenticated'});});
-}finally{if(store)store.close();if(emulator)await emulator.close();if(dir)await rm(dir,{recursive:true,force:true});if(runtimePool)await runtimePool.end();if(authPool)await authPool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}" with (force)`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
+}finally{if(store)store.close();if(emulator)await emulator.close();if(dir)await rm(dir,{recursive:true,force:true});if(runtimePool)await runtimePool.end();if(authPool)await authPool.end();if(db)await db.end();if(madeDb)await q(admin,`drop database "${dbname}"`);for(const r of roles.reverse())await q(admin,`drop role ${r}`);await admin.end();}
 console.log(`\n${passed} passed; ${failed} failed. Local Better Auth + PostgreSQL + S3 emulator.`);if(failed)process.exitCode=1;
