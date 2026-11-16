@@ -52,3 +52,8 @@ src/app/(workspace)/workspace/customers/loading.tsx
 tests/unit/customer-detail.test.tsx
 
 tests/unit/customer-gstin-vectors.json
+tests/unit/auth-form-flow.test.tsx
+tests/unit/auth-logout.test.ts
+src/app/(workspace)/workspace/actions.ts
+src/app/(auth)/account/page.tsx
+tests/unit/auth-account.test.tsx

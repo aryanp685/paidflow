@@ -12,13 +12,19 @@ function protect(response: NextResponse) {
 export async function GET(request: NextRequest) {
   const origin=getSiteOrigin();
   if (!origin || !getSupabaseConfig()) return protect(new NextResponse("Authentication is not configured.",{status:503}));
-  const code=request.nextUrl.searchParams.get("code");
-  const flow=request.nextUrl.searchParams.get("flow");
-  if (flow === "recovery") {
+  const codes=request.nextUrl.searchParams.getAll("code");
+  const flows=request.nextUrl.searchParams.getAll("flow");
+  // The flow label is not trusted proof of purpose. Reject ambiguity and
+  // retain the existing recovery hold even if an attacker supplies it twice.
+  if (flows.includes("recovery")) {
     const response=NextResponse.redirect(new URL("/forgot-password?error=unavailable",origin));
     response.cookies.delete("paidflow_recovery");
     return protect(response);
   }
+  if (flows.length > 1 || codes.length !== 1 || !codes[0]) {
+    return protect(NextResponse.redirect(new URL("/verify-email?error=expired",origin)));
+  }
+  const code=codes[0];
   if (code) {
     // Modern supabase-js stores concurrent PKCE verifiers in separate slots.
     // In a server callback the SDK cannot read the URL itself; without this ID
@@ -29,14 +35,18 @@ export async function GET(request: NextRequest) {
     if (flowIds.length > 1 || (flowIds.length === 1 && !/^[a-zA-Z0-9_-]{8,64}$/.test(flowIds[0]))) {
       return protect(NextResponse.redirect(new URL("/verify-email?error=expired",origin)));
     }
-    const supabase=await createClient();
-    const {error}=flowIds.length === 1
-      ? await supabase.auth.exchangeCodeForSession(code,{flowId:flowIds[0]})
-      : await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
-      const response=NextResponse.redirect(new URL("/workspace",origin));
-      response.cookies.delete("paidflow_recovery");
-      return protect(response);
+    try {
+      const supabase=await createClient();
+      const {data,error}=flowIds.length === 1
+        ? await supabase.auth.exchangeCodeForSession(code,{flowId:flowIds[0]})
+        : await supabase.auth.exchangeCodeForSession(code);
+      if (!error && data?.session && data.user?.id && data.session.user?.id === data.user.id) {
+        const response=NextResponse.redirect(new URL("/workspace",origin));
+        response.cookies.delete("paidflow_recovery");
+        return protect(response);
+      }
+    } catch {
+      // Fail without logging or reflecting one-time codes/provider errors.
     }
   }
   return protect(NextResponse.redirect(new URL("/verify-email?error=expired",origin)));

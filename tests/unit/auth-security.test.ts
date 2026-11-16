@@ -14,9 +14,9 @@ beforeEach(()=>{vi.clearAllMocks();mocks.config.mockReturnValue({url:'https://au
 describe('session and recovery safety',()=>{
  it('never updates a password via the disabled reset action',async()=>{expect(await resetPassword('synthetic-password')).toEqual({error:true});expect(mocks.getUser).not.toHaveBeenCalled();expect(mocks.exchange).not.toHaveBeenCalled();});
  it('recovery callback clears legacy marker and never exchanges a code',async()=>{const r=await GET(new NextRequest('https://paidflow.example/auth/callback?flow=recovery&code=synthetic'));expect(r.headers.get('location')).toBe('https://paidflow.example/forgot-password?error=unavailable');expect(r.headers.get('cache-control')).toBe('no-store');expect(r.headers.get('referrer-policy')).toBe('no-referrer');expect(r.cookies.get('paidflow_recovery')?.value).toBe('');expect(mocks.exchange).not.toHaveBeenCalled();});
- it('normal verification callback still works and clears the legacy marker',async()=>{mocks.exchange.mockResolvedValue({error:null});const r=await GET(new NextRequest('https://paidflow.example/auth/callback?flow=verify&code=synthetic'));expect(mocks.exchange).toHaveBeenCalledWith('synthetic');expect(r.headers.get('location')).toBe('https://paidflow.example/workspace');expect(r.cookies.get('paidflow_recovery')?.value).toBe('');});
+ it('normal verification callback still works and clears the legacy marker',async()=>{mocks.exchange.mockResolvedValue({data:{user:{id:'synthetic-user'},session:{user:{id:'synthetic-user'}}},error:null});const r=await GET(new NextRequest('https://paidflow.example/auth/callback?flow=verify&code=synthetic'));expect(mocks.exchange).toHaveBeenCalledWith('synthetic');expect(r.headers.get('location')).toBe('https://paidflow.example/workspace');expect(r.cookies.get('paidflow_recovery')?.value).toBe('');});
  it('passes a valid PKCE flow id to the SDK and rejects ambiguous or invalid IDs',async()=>{
-  mocks.exchange.mockResolvedValue({error:null});const id='abcdef0123456789abcdef0123456789';
+  mocks.exchange.mockResolvedValue({data:{user:{id:'synthetic-user'},session:{user:{id:'synthetic-user'}}},error:null});const id='abcdef0123456789abcdef0123456789';
   const ok=await GET(new NextRequest(`https://paidflow.example/auth/callback?flow=verify&code=synthetic&sb_flow_id=${id}`));
   expect(mocks.exchange).toHaveBeenCalledWith('synthetic',{flowId:id});expect(ok.headers.get('location')).toBe('https://paidflow.example/workspace');
   for(const query of ['sb_flow_id=bad','sb_flow_id=','sb_flow_id=abcdefgh&sb_flow_id=ijklmnop']){
@@ -24,8 +24,32 @@ describe('session and recovery safety',()=>{
     expect(r.headers.get('location')).toBe('https://paidflow.example/verify-email?error=expired');expect(r.headers.get('cache-control')).toBe('no-store');expect(mocks.exchange).not.toHaveBeenCalled();
   }
  });
+ it('rejects duplicate code or flow parameters without exchanging and retains the recovery hold',async()=>{
+  for(const query of ['code=a&code=b','flow=verify&flow=verify&code=a','flow=verify&flow=recovery&code=a','code=']){
+    mocks.exchange.mockClear();const r=await GET(new NextRequest(`https://paidflow.example/auth/callback?${query}`));
+    expect(r.headers.get('location')).toBe(query.includes('recovery')?'https://paidflow.example/forgot-password?error=unavailable':'https://paidflow.example/verify-email?error=expired');
+    expect(r.headers.get('cache-control')).toBe('no-store');expect(r.headers.get('referrer-policy')).toBe('no-referrer');expect(mocks.exchange).not.toHaveBeenCalled();
+  }
+ });
+ it('fails closed for provider errors, inconsistent sessions and transport exceptions',async()=>{
+  for(const result of [{data:null,error:null},{data:{user:{id:'a'},session:{user:{id:'b'}}},error:null},{data:null,error:{message:'private'}}]){
+    mocks.exchange.mockResolvedValueOnce(result);const r=await GET(new NextRequest('https://paidflow.example/auth/callback?code=synthetic'));
+    expect(r.headers.get('location')).toBe('https://paidflow.example/verify-email?error=expired');expect(r.headers.get('cache-control')).toBe('no-store');
+  }
+  mocks.exchange.mockRejectedValueOnce(new Error('private'));const r=await GET(new NextRequest('https://paidflow.example/auth/callback?code=synthetic'));
+  expect(r.headers.get('location')).toBe('https://paidflow.example/verify-email?error=expired');
+ });
  it('auth errors never admit a user even if a user object is returned',async()=>{for(const status of [400,401,403]){mocks.getUser.mockResolvedValue({data:{user},error:{status}});await expect(requireUser()).rejects.toThrow('REDIRECT /login');}mocks.getUser.mockResolvedValue({data:{user},error:{status:503}});await expect(requireUser()).rejects.toThrow('Unable to verify the session');});
  it('absent, unverified and unconfigured sessions fail closed',async()=>{mocks.config.mockReturnValue(null);await expect(requireUser()).rejects.toThrow('REDIRECT /login?setup=required');mocks.config.mockReturnValue({});mocks.getUser.mockResolvedValue({data:{user:null},error:null});await expect(requireUser()).rejects.toThrow('REDIRECT /login');mocks.getUser.mockResolvedValue({data:{user:{...user,email_confirmed_at:null}},error:null});await expect(requireUser()).rejects.toThrow('REDIRECT /verify-email');});
  it('requires the active-membership filter and denies when no active membership exists',async()=>{const eq=vi.fn().mockReturnThis();const select=vi.fn().mockReturnValue({eq});eq.mockReturnValueOnce({eq}).mockResolvedValueOnce({data:[],error:null});mocks.from.mockReturnValue({select});await expect(getWorkspace()).rejects.toThrow('REDIRECT /onboarding');expect(eq).toHaveBeenCalledWith('user_id',user.id);expect(eq).toHaveBeenCalledWith('status','active');expect(mocks.from).toHaveBeenCalledTimes(1);});
- it('membership lookup errors fail closed',async()=>{const eq=vi.fn();eq.mockReturnValueOnce({eq}).mockResolvedValueOnce({data:null,error:{message:'synthetic'}});mocks.from.mockReturnValue({select:()=>({eq})});await expect(getWorkspace()).rejects.toThrow('Unable to load workspace membership');});
+ it('a synthetic confirmation followed by a missing membership table reaches the guarded account notice',async()=>{
+  mocks.exchange.mockResolvedValue({data:{user:{id:'user-1'},session:{user:{id:'user-1'}}},error:null});
+  const callback=await GET(new NextRequest('https://paidflow.example/auth/callback?flow=verify&code=synthetic'));
+  expect(callback.headers.get('location')).toBe('https://paidflow.example/workspace');
+  const eq=vi.fn();eq.mockReturnValueOnce({eq}).mockResolvedValueOnce({data:null,error:{code:'PGRST205'}});mocks.from.mockReturnValue({select:()=>({eq})});
+  await expect(getWorkspace()).rejects.toThrow('REDIRECT /account?workspace=unavailable');
+  expect(mocks.getUser).toHaveBeenCalledOnce();
+ });
+ it('missing workspace schema shows a guarded setup notice rather than inventing membership',async()=>{for(const code of ['PGRST205','42P01']){const eq=vi.fn();eq.mockReturnValueOnce({eq}).mockResolvedValueOnce({data:null,error:{code}});mocks.from.mockReturnValue({select:()=>({eq})});await expect(getWorkspace()).rejects.toThrow('REDIRECT /account?workspace=unavailable');}});
+ it('membership lookup errors fail closed',async()=>{const eq=vi.fn();eq.mockReturnValueOnce({eq}).mockResolvedValueOnce({data:null,error:{code:'42501',message:'synthetic'}});mocks.from.mockReturnValue({select:()=>({eq})});await expect(getWorkspace()).rejects.toThrow('Unable to load workspace membership');});
 });
