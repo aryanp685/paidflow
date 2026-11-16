@@ -5,7 +5,8 @@ import { z } from "zod";
 import { getWorkspace } from "@/lib/supabase/guard";
 import { canManageCustomers } from "@/lib/validation/customer";
 import { formatPaise } from "@/lib/financial/money";
-import { reminderTemplates } from "@/lib/reminders/templates";
+import { reminderTemplateVariants } from "@/lib/reminders/templates";
+import { indiaDate } from "@/lib/financial/analytics";
 import { ReminderComposer } from "@/components/reminders/reminder-composer";
 
 export default async function ReminderPage({ params }: { params: Promise<{ id: string }> }) {
@@ -18,9 +19,10 @@ export default async function ReminderPage({ params }: { params: Promise<{ id: s
   if (!invoice || invoice.is_archived || invoice.lifecycle_status !== "issued" || invoice.balance_paise <= 0) notFound();
   const { data: customer, error: customerError } = await supabase.from("customers").select("name").eq("business_id", business.id).eq("id", invoice.customer_id).maybeSingle();
   if (customerError || !customer) throw new Error("Unable to load customer for reminder.");
-  const templates = reminderTemplates({ customerName: customer.name, invoiceNumber: invoice.invoice_number, dueDate: invoice.due_date, balance: formatPaise(invoice.balance_paise), businessName: business.name });
-  return <><Link className="customer-back" href="/workspace/reminders"><ArrowLeft size={15} /> Reminders</Link><div className="workspace-page-head"><div><div className="auth-kicker"><span /> MANUAL FOLLOW-UP</div><h1>Prepare reminder</h1><p>Invoice {invoice.invoice_number} · Balance at page load: {formatPaise(invoice.balance_paise)}</p></div></div>
-    <div className="invoice-notice" role="note">Verify the customer, invoice and current balance before sharing. This draft is not saved and will not update if the balance changes.</div>
-    <ReminderComposer templates={templates} />
+  const asOf = indiaDate(new Date());
+  const variants = reminderTemplateVariants({ customerName: customer.name, invoiceNumber: invoice.invoice_number, dueDate: invoice.due_date, balance: formatPaise(invoice.balance_paise), businessName: business.name }, asOf);
+  return <><Link className="customer-back" href="/workspace/reminders"><ArrowLeft size={15} /> Collections</Link><div className="workspace-page-head"><div><div className="auth-kicker"><span /> MANUAL FOLLOW-UP</div><h1>Prepare reminder</h1><p>Invoice {invoice.invoice_number} · Balance at page load: {formatPaise(invoice.balance_paise)}</p></div></div>
+    <div className="invoice-notice" role="note">Verify the customer, invoice and current balance before sharing. This draft is not saved and will not update if the balance or date changes. Date-specific drafts use the India date at page load.</div>
+    <ReminderComposer templates={variants.general} variants={variants} />
   </>;
 }

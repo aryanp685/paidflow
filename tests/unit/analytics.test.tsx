@@ -18,6 +18,20 @@ describe("invoice analytics arithmetic",()=>{
     expect(result).toMatchObject({invoiceCount:10,outstandingCount:9,overdueCount:7,outstanding:4500n,overdue:4200n});
     expect(result.buckets.map(x=>[x.count,x.balance])).toEqual([[2,300n],[2,700n],[2,1100n],[2,1500n],[1,900n]]);
   });
+  it("calculates due-next-seven-days from today through day six, excluding overdue, day seven and paid invoices",()=>{
+    const rows = [
+      {id:"overdue",due_date:"2028-02-26",balance_paise:100},
+      {id:"today",due_date:"2028-02-27",balance_paise:200},
+      {id:"leap",due_date:"2028-02-29",balance_paise:300},
+      {id:"last",due_date:"2028-03-04",balance_paise:"9007199254740991"},
+      {id:"next",due_date:"2028-03-05",balance_paise:400},
+      {id:"paid",due_date:"2028-02-27",balance_paise:0},
+    ];
+    const result=invoiceAnalytics(rows,"2028-02-27");
+    expect(result.dueNext7Count).toBe(3);
+    expect(result.dueNext7).toBe(9007199254741491n);
+    expect(result.overdue).toBe(100n);
+  });
   it("preserves totals exceeding safe JS integers",()=>{const r=invoiceAnalytics([{id:"1",due_date:"2026-01-01",balance_paise:9007199254740991},{id:"2",due_date:"2026-01-01",balance_paise:"9007199254740991"}],"2026-02-01");expect(r.outstanding).toBe(18014398509481982n);});
   it("rejects invalid dates, negative or unsafe balances and duplicate rows",()=>{const row={id:"1",due_date:"2026-01-01",balance_paise:1};for(const r of [[{...row,due_date:"2026-02-30"}],[{...row,balance_paise:-1}],[{...row,balance_paise:Number.MAX_SAFE_INTEGER+1}],[{...row,balance_paise:"1.5"}],[row,row]]) expect(()=>invoiceAnalytics(r,"2026-05-01")).toThrow();expect(()=>invoiceAnalytics([],"2026-02-30")).toThrow();});
   it("rejects unexpected runtime types rather than coercing them into balances or identifiers",()=>{

@@ -2,23 +2,15 @@ import Link from "next/link";
 import { CalendarClock, CircleDollarSign, ReceiptText, TriangleAlert } from "lucide-react";
 import { getWorkspace } from "@/lib/supabase/guard";
 import { formatPaise } from "@/lib/financial/money";
-import { indiaDate, invoiceAnalytics } from "@/lib/financial/analytics";
-
-const MAX_INVOICES = 1000;
+import { indiaDate } from "@/lib/financial/analytics";
+import { loadInvoiceAnalytics, MAX_ANALYTICS_INVOICES } from "@/lib/financial/load-invoice-analytics";
 export default async function AnalyticsPage() {
   const { business, supabase } = await getWorkspace();
-  // A single bounded query avoids combining separate pages from different
-  // snapshots. A provider-side cap or incomplete result must never look like 0.
-  const { data, count, error } = await supabase.from("invoices").select("id,due_date,balance_paise", { count: "exact" })
-    .eq("business_id", business.id).eq("is_archived", false).eq("lifecycle_status", "issued")
-    .order("id", { ascending: true }).range(0, MAX_INVOICES - 1);
-  if (error || count == null || data === null) throw new Error("Unable to load analytics. Please try again.");
-  if (!Number.isSafeInteger(count) || count < 0) throw new Error("Unable to verify analytics data.");
-  const header = <div className="workspace-page-head"><div><div className="auth-kicker"><span /> YOUR WORKSPACE</div><h1>Analytics</h1><p>A summary of recorded invoice balances in this workspace.</p></div></div>;
-  if (count > MAX_INVOICES) return <>{header}<div className="invoice-notice" role="alert">Analytics is unavailable for more than {MAX_INVOICES.toLocaleString("en-IN")} issued invoices. No partial totals are shown. <Link href="/workspace/invoices">View invoices instead →</Link></div></>;
-  if (data.length !== count) throw new Error("Unable to load complete analytics data. Please try again.");
   const today = indiaDate(new Date());
-  const summary = invoiceAnalytics(data, today);
+  const result = await loadInvoiceAnalytics(supabase, business.id, today);
+  const header = <div className="workspace-page-head"><div><div className="auth-kicker"><span /> YOUR WORKSPACE</div><h1>Analytics</h1><p>A summary of recorded invoice balances in this workspace.</p></div></div>;
+  if (result.kind === "too-many") return <>{header}<div className="invoice-notice" role="alert">Analytics is unavailable for more than {MAX_ANALYTICS_INVOICES.toLocaleString("en-IN")} issued invoices. No partial totals are shown. <Link href="/workspace/invoices">View invoices instead →</Link></div></>;
+  const { summary } = result;
   return <>{header}<div className="invoice-notice" role="note">Based on non-archived issued invoices as loaded, using their recorded balances. Overdue means due before {today} (India time); invoices due today are not overdue. Payments are user-reported and not independently verified. Data can change after loading.</div>
     <div className="dashboard-summary analytics-summary">
       <div className="dashboard-metric"><span><ReceiptText size={19} /></span><p>Issued invoices</p><strong>{summary.invoiceCount}</strong><small>Excludes drafts, cancelled and archived invoices</small></div>
